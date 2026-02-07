@@ -1,0 +1,92 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum TableStatus {
+  OPEN
+  RUNNING
+  CLOSED
+}
+
+enum SeatState {
+  EMPTY
+  SITTING
+  PLAYING
+}
+
+enum LedgerType {
+  BUYIN
+  CASHOUT
+  ADJUST
+}
+
+model User {
+  id           String   @id @default(uuid())
+  username     String   @unique
+  passwordHash String
+  createdAt    DateTime @default(now())
+
+  wallet Wallet?
+  seats  TableSeat[]
+  ledger LedgerTransaction[]
+}
+
+model Wallet {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  balance   Int      @default(0)
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id])
+}
+
+model LedgerTransaction {
+  id        String     @id @default(uuid())
+  userId    String
+  tableId   String?
+  type      LedgerType
+  amount    Int
+  createdAt DateTime   @default(now())
+
+  user  User   @relation(fields: [userId], references: [id])
+  table Table? @relation(fields: [tableId], references: [id])
+
+  @@index([userId, createdAt])
+  @@index([tableId, createdAt])
+}
+
+model Table {
+  id         String      @id @default(uuid())
+  name       String
+  smallBlind Int
+  bigBlind   Int
+  maxPlayers Int
+  status     TableStatus @default(OPEN)
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+
+  seats  TableSeat[]
+  ledger LedgerTransaction[]
+
+  @@index([status])
+}
+
+model TableSeat {
+  id        String    @id @default(uuid())
+  tableId   String
+  seatNo    Int
+  userId    String?
+  stack     Int       @default(0)
+  state     SeatState @default(EMPTY)
+  updatedAt DateTime  @updatedAt
+
+  table Table @relation(fields: [tableId], references: [id])
+  user  User? @relation(fields: [userId], references: [id])
+
+  @@unique([tableId, seatNo])
+  @@index([userId])
+}
