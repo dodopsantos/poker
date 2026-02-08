@@ -24,6 +24,9 @@ export function buildSocketServer(httpServer: any) {
     });
 
     io.on("connection", (socket) => {
+        const user = (socket.data as any).user as { userId: string; username: string };
+        socket.join(`user:${user.userId}`);
+
         registerLobbyGateway(io, socket);
         registerTableGateway(io, socket);
     });
