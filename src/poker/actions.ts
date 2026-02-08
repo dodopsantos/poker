@@ -90,6 +90,9 @@ export async function applyTableAction(params: {
   const rt = await getRuntime(tableId);
   if (!rt) throw new Error("NO_HAND_RUNNING");
 
+  // While the server is revealing board cards (timed animation), no one may act.
+  if ((rt as any).isDealingBoard) throw new Error("DEALING_BOARD");
+
   const seat = Object.values(rt.players).find((p) => p.userId === userId);
   if (!seat) throw new Error("NOT_SEATED");
   if (seat.hasFolded) throw new Error("ALREADY_FOLDED");
@@ -169,9 +172,15 @@ export async function applyTableAction(params: {
     // reset bets each street
     resetBets(rt);
 
-    if (next === "FLOP") dealBoard(rt, 3);
-    else if (next === "TURN") dealBoard(rt, 1);
-    else if (next === "RIVER") dealBoard(rt, 1);
+    if (next === "FLOP" || next === "TURN" || next === "RIVER") {
+      // Draw the street cards now, but reveal them later via timed snapshots.
+      // This keeps the server authoritative AND lets clients animate card dealing.
+      const n = next === "FLOP" ? 3 : 1;
+      const d = draw(rt.deck, n);
+      rt.deck = d.rest;
+      (rt as any).pendingBoard = d.drawn;
+      (rt as any).isDealingBoard = true;
+    }
     else if (next === "SHOWDOWN") {
       // Ensure pot total matches the sum of all committed chips (important for side pots).
       rt.pot.total = Object.values(rt.players).reduce((sum, p) => sum + Math.max(0, Math.floor(p.committed ?? 0)), 0);

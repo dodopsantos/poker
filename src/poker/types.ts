@@ -19,6 +19,10 @@ export type TableRuntime = {
   currentTurnSeat: number;
   deck: string[];   // remaining deck
   board: string[];
+  /** Cards drawn for the next street but not yet revealed (used for server-timed animations). */
+  pendingBoard?: string[];
+  /** True while the server is revealing board cards (clients should not act). */
+  isDealingBoard?: boolean;
   pot: { total: number };
   currentBet: number;
   minRaise: number;
