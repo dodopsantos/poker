@@ -2,7 +2,7 @@ import type { Server, Socket } from "socket.io";
 import { getOrBuildTableState, sitWithBuyIn, leaveWithCashout } from "../services/table.service";
 import { ensureWallet } from "../services/wallet.service";
 import { startHandIfReady, getPrivateCards, getRuntime, setRuntime } from "../poker/runtime";
-import { applyTableAction, type PlayerAction } from "../poker/actions";
+import { applyTableAction, advanceAutoRunout, type PlayerAction } from "../poker/actions";
 
 // --- Server-timed UX (PokerStars-like pacing) ---
 // Board dealing (flop/turn/river) reveal timings
@@ -67,6 +67,49 @@ async function revealPendingBoard(
   } finally {
     revealingTables.delete(tableId);
   }
+}
+
+async function runAutoRunout(
+  io: Server,
+  tableId: string,
+  getState: () => Promise<any>,
+  getRt: () => Promise<any>,
+  setRt: (rt: any) => Promise<void>
+): Promise<
+  | null
+  | {
+      showdown: {
+        pot: number;
+        reveal: Array<{ seatNo: number; userId: string; cards: string[] }>;
+        winners: Array<{ seatNo: number; userId: string; payout: number }>;
+      };
+    }
+> {
+  // Keep advancing streets while auto-runout is enabled.
+  for (let guard = 0; guard < 10; guard++) {
+    const step = await advanceAutoRunout(tableId);
+    if (!step) return null;
+
+    const state = await getState();
+    io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
+
+    if ((step as any).handEnded && (step as any).showdown) {
+      return { showdown: (step as any).showdown };
+    }
+
+    const rt = await getRt();
+    const pending = Array.isArray((rt as any)?.pendingBoard) ? ((rt as any).pendingBoard as string[]) : [];
+    if (rt && (rt as any).isDealingBoard && pending.length) {
+      await revealPendingBoard(io, tableId, getState, getRt, setRt);
+      // Loop again after the reveal.
+      continue;
+    }
+
+    // Nothing left to do.
+    return null;
+  }
+
+  return null;
 }
 
 export function registerTableGateway(io: Server, socket: Socket) {
@@ -156,6 +199,61 @@ export function registerTableGateway(io: Server, socket: Socket) {
                 () => getRuntime(tableId),
                 (r) => setRuntime(tableId, r)
               );
+            }
+
+            // If the hand is in "auto-runout" mode (all-in / no more actions),
+            // keep dealing streets until showdown.
+            const auto = await runAutoRunout(
+              io,
+              tableId,
+              () => getOrBuildTableState(tableId),
+              () => getRuntime(tableId),
+              (r) => setRuntime(tableId, r)
+            );
+
+            if (auto?.showdown) {
+              const sd = auto.showdown;
+
+              io.to(`table:${tableId}`).emit("table:event", {
+                type: "SHOWDOWN_REVEAL",
+                tableId,
+                pot: sd.pot,
+                reveal: sd.reveal,
+                winners: sd.winners,
+              });
+              io.to(`table:${tableId}`).emit("table:event", {
+                type: "HAND_ENDED",
+                tableId,
+                winners: sd.winners,
+                pot: sd.pot,
+              });
+
+              // Auto-start next hand after a short pause so players can see the result.
+              setTimeout(() => {
+                void (async () => {
+                  try {
+                    const start = await startHandIfReady(tableId);
+                    if (start.started && start.runtime) {
+                      const newState = await getOrBuildTableState(tableId);
+                      io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
+                      io.to(`table:${tableId}`).emit("table:event", {
+                        type: "HAND_STARTED",
+                        tableId,
+                        handId: start.runtime.handId,
+                        round: start.runtime.round,
+                      });
+
+                      for (const p of Object.values(start.runtime.players)) {
+                        const cards = await getPrivateCards(tableId, start.runtime.handId, p.userId);
+                        if (cards)
+                          io.to(`user:${p.userId}`).emit("table:private_cards", { tableId, handId: start.runtime.handId, cards });
+                      }
+                    }
+                  } catch {
+                    // ignore
+                  }
+                })();
+              }, SHOWDOWN_HOLD_MS);
             }
           } catch {
             // ignore

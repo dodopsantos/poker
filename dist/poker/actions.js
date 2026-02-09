@@ -1,40 +1,69 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.applyTableAction = applyTableAction;
+exports.advanceAutoRunout = advanceAutoRunout;
 const prisma_1 = require("../prisma");
 const runtime_1 = require("./runtime");
 const cards_1 = require("./cards");
 const showdown_1 = require("./showdown");
-function activeSeats(rt) {
-    return Object.values(rt.players)
-        .filter((p) => !p.hasFolded)
+function contenders(rt) {
+    return Object.values(rt.players).filter((p) => !p.hasFolded);
+}
+// Seats that can still take actions (not folded, not all-in, stack > 0)
+function actionables(rt) {
+    return contenders(rt).filter((p) => !p.isAllIn && (p.stack ?? 0) > 0);
+}
+function activeSeatNos(rt) {
+    return contenders(rt)
         .map((p) => p.seatNo)
         .sort((a, b) => a - b);
 }
-function nextActiveSeat(rt, fromSeat) {
-    const act = activeSeats(rt);
-    for (const s of act)
+function actionableSeatNos(rt) {
+    return actionables(rt)
+        .map((p) => p.seatNo)
+        .sort((a, b) => a - b);
+}
+function nextSeatFrom(list, fromSeat) {
+    if (!list.length)
+        return fromSeat;
+    for (const s of list)
         if (s > fromSeat)
             return s;
-    return act[0];
+    return list[0];
+}
+function nextActionableSeat(rt, fromSeat) {
+    return nextSeatFrom(actionableSeatNos(rt), fromSeat);
+}
+function nextActiveSeat(rt, fromSeat) {
+    return nextSeatFrom(activeSeatNos(rt), fromSeat);
 }
 function onlyOneLeft(rt) {
-    const act = activeSeats(rt);
+    const act = activeSeatNos(rt);
     return act.length === 1 ? act[0] : null;
 }
 function isRoundSettled(rt) {
-    const act = Object.values(rt.players).filter((p) => !p.hasFolded);
+    const act = contenders(rt);
     if (act.length <= 1)
+        return true;
+    // If nobody (or only one seat) can still act because everyone else is all-in,
+    // the betting round is effectively over.
+    const actionable = actionables(rt);
+    if (actionable.length <= 1)
         return true;
     // Each player must get a chance to act on streets where currentBet == 0.
     // With the old logic, "CHECK" by the first player would instantly settle the round
     // (because everyone had bet=0), skipping the other player's turn.
-    const allActed = act.every((p) => p.stack === 0 || rt.actedThisRound[p.seatNo] === true);
+    const allActed = act.every((p) => p.isAllIn || p.stack === 0 || rt.actedThisRound[p.seatNo] === true);
     if (rt.currentBet === 0) {
         return allActed;
     }
-    const allMatched = act.every((p) => p.stack === 0 || p.bet === rt.currentBet);
+    const allMatched = act.every((p) => p.isAllIn || p.stack === 0 || p.bet === rt.currentBet);
     return allMatched && allActed;
+}
+function shouldAutoRunout(rt) {
+    // Auto-runout when there is no meaningful betting left (all remaining opponents are all-in).
+    // Example: 2 players, one all-in, the other calls (not all-in) -> betting is over.
+    return contenders(rt).length >= 2 && actionables(rt).length <= 1;
 }
 function resetBets(rt) {
     for (const p of Object.values(rt.players))
@@ -151,6 +180,7 @@ async function applyTableAction(params) {
         resetBets(rt);
         if (next === "FLOP" || next === "TURN" || next === "RIVER") {
             // Draw the street cards now, but reveal them later via timed snapshots.
+            // This keeps the server authoritative AND lets clients animate card dealing.
             const n = next === "FLOP" ? 3 : 1;
             const d = (0, cards_1.draw)(rt.deck, n);
             rt.deck = d.rest;
@@ -172,14 +202,71 @@ async function applyTableAction(params) {
             await (0, runtime_1.clearRuntime)(tableId);
             return { runtime: null, handEnded: true, showdown: { reveal, winners, pot: rt.pot.total } };
         }
-        // set turn to first active seat after dealer for postflop
-        rt.currentTurnSeat = nextActiveSeat(rt, rt.dealerSeat);
+        // If betting is over because everyone else is all-in, we auto-runout the rest of the board.
+        // The gateway will keep revealing streets until SHOWDOWN.
+        rt.autoRunout = shouldAutoRunout(rt);
+        // set turn to first actionable seat after dealer for postflop
+        rt.currentTurnSeat = nextActionableSeat(rt, rt.dealerSeat);
     }
     else {
         // next player's turn
-        rt.currentTurnSeat = nextActiveSeat(rt, rt.currentTurnSeat);
+        rt.currentTurnSeat = nextActionableSeat(rt, rt.currentTurnSeat);
     }
     await (0, runtime_1.setRuntime)(tableId, rt);
     await persistStacks(tableId, rt);
+    return { runtime: rt, handEnded: false };
+}
+/**
+ * When a hand reaches a state where there are no meaningful actions left (everyone else is all-in),
+ * we keep dealing streets automatically until SHOWDOWN. This is triggered by the gateway right
+ * after a street reveal finishes.
+ */
+async function advanceAutoRunout(tableId) {
+    const rt = await (0, runtime_1.getRuntime)(tableId);
+    if (!rt)
+        return null;
+    // Only continue if auto-runout mode is enabled.
+    if (!rt.autoRunout)
+        return null;
+    // Don't interfere while a street is being revealed.
+    if (rt.isDealingBoard)
+        return null;
+    // If players became able to act again (e.g., side pot scenario with 3+ players), stop.
+    if (!shouldAutoRunout(rt)) {
+        rt.autoRunout = false;
+        await (0, runtime_1.setRuntime)(tableId, rt);
+        return { runtime: rt, handEnded: false };
+    }
+    // If we already have a full board, go to showdown.
+    if (rt.board.length >= 5 || rt.round === "SHOWDOWN") {
+        rt.round = "SHOWDOWN";
+        rt.pot.total = Object.values(rt.players).reduce((sum, p) => sum + Math.max(0, Math.floor(p.committed ?? 0)), 0);
+        const { reveal, winners } = await (0, showdown_1.resolveShowdown)({ tableId, rt });
+        for (const w of winners) {
+            const p = rt.players[w.seatNo];
+            if (p)
+                p.stack += w.payout;
+        }
+        await persistStacks(tableId, rt);
+        await (0, runtime_1.clearRuntime)(tableId);
+        return { runtime: null, handEnded: true, showdown: { reveal, winners, pot: rt.pot.total } };
+    }
+    // Otherwise, advance one street and queue the pending board reveal.
+    const next = (0, runtime_1.roundNext)(rt.round);
+    rt.round = next;
+    resetBets(rt);
+    if (next === "FLOP" || next === "TURN" || next === "RIVER") {
+        const n = next === "FLOP" ? 3 : 1;
+        const d = (0, cards_1.draw)(rt.deck, n);
+        rt.deck = d.rest;
+        rt.pendingBoard = d.drawn;
+        rt.isDealingBoard = true;
+        rt.currentTurnSeat = nextActionableSeat(rt, rt.dealerSeat);
+        await (0, runtime_1.setRuntime)(tableId, rt);
+        return { runtime: rt, handEnded: false };
+    }
+    // Fallback: if something unexpected happens, disable auto-runout.
+    rt.autoRunout = false;
+    await (0, runtime_1.setRuntime)(tableId, rt);
     return { runtime: rt, handEnded: false };
 }

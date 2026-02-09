@@ -5,46 +5,49 @@ const table_service_1 = require("../services/table.service");
 const wallet_service_1 = require("../services/wallet.service");
 const runtime_1 = require("../poker/runtime");
 const actions_1 = require("../poker/actions");
-
 // --- Server-timed UX (PokerStars-like pacing) ---
+// Board dealing (flop/turn/river) reveal timings
 const STREET_PRE_DELAY_MS = 250;
 const BOARD_CARD_INTERVAL_MS = 220;
 const STREET_POST_DELAY_MS = 350;
+// Hand end pacing
 const SHOWDOWN_HOLD_MS = 2500;
 const WIN_BY_FOLD_HOLD_MS = 1500;
+// In-memory per-table reveal lock to avoid overlapping reveal sequences.
 const revealingTables = new Set();
-async function revealPendingBoard(io, tableId) {
+async function revealPendingBoard(io, tableId, getState, getRt, setRt) {
     if (revealingTables.has(tableId))
         return;
-    const rt0 = await (0, runtime_1.getRuntime)(tableId);
-    const pending0 = Array.isArray(rt0?.pendingBoard) ? rt0.pendingBoard : [];
-    if (!pending0.length)
+    const rt0 = await getRt();
+    const pending = Array.isArray(rt0?.pendingBoard) ? rt0.pendingBoard : [];
+    if (!pending.length)
         return;
     revealingTables.add(tableId);
     try {
+        // Small pause before the first card appears.
         await new Promise((r) => setTimeout(r, STREET_PRE_DELAY_MS));
-        while (true) {
-            const rt = await (0, runtime_1.getRuntime)(tableId);
-            if (!rt)
+        for (let i = 0; i < pending.length; i++) {
+            const rt = await getRt();
+            const cards = Array.isArray(rt?.pendingBoard) ? rt.pendingBoard : [];
+            if (!cards.length)
                 break;
-            const pending = Array.isArray(rt.pendingBoard) ? rt.pendingBoard : [];
-            if (!pending.length)
-                break;
-            const card = pending.shift();
+            const card = cards.shift();
             rt.board = Array.isArray(rt.board) ? rt.board : [];
             rt.board.push(card);
-            rt.pendingBoard = pending;
-            await (0, runtime_1.setRuntime)(tableId, rt);
-            const state = await (0, table_service_1.getOrBuildTableState)(tableId);
+            rt.pendingBoard = cards;
+            await setRt(rt);
+            const state = await getState();
             io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
+            // Interval between cards (flop: 3x)
             await new Promise((r) => setTimeout(r, BOARD_CARD_INTERVAL_MS));
         }
-        const rtFinal = await (0, runtime_1.getRuntime)(tableId);
+        // Finish dealing, unlock actions.
+        const rtFinal = await getRt();
         if (rtFinal) {
             rtFinal.pendingBoard = [];
             rtFinal.isDealingBoard = false;
-            await (0, runtime_1.setRuntime)(tableId, rtFinal);
-            const state = await (0, table_service_1.getOrBuildTableState)(tableId);
+            await setRt(rtFinal);
+            const state = await getState();
             io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
         }
         await new Promise((r) => setTimeout(r, STREET_POST_DELAY_MS));
@@ -52,6 +55,29 @@ async function revealPendingBoard(io, tableId) {
     finally {
         revealingTables.delete(tableId);
     }
+}
+async function runAutoRunout(io, tableId, getState, getRt, setRt) {
+    // Keep advancing streets while auto-runout is enabled.
+    for (let guard = 0; guard < 10; guard++) {
+        const step = await (0, actions_1.advanceAutoRunout)(tableId);
+        if (!step)
+            return null;
+        const state = await getState();
+        io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
+        if (step.handEnded && step.showdown) {
+            return { showdown: step.showdown };
+        }
+        const rt = await getRt();
+        const pending = Array.isArray(rt?.pendingBoard) ? rt.pendingBoard : [];
+        if (rt && rt.isDealingBoard && pending.length) {
+            await revealPendingBoard(io, tableId, getState, getRt, setRt);
+            // Loop again after the reveal.
+            continue;
+        }
+        // Nothing left to do.
+        return null;
+    }
+    return null;
 }
 function registerTableGateway(io, socket) {
     const user = socket.data.user;
@@ -109,23 +135,73 @@ function registerTableGateway(io, socket) {
             const result = await (0, actions_1.applyTableAction)({ tableId, userId: user.userId, action, amount });
             const state = await (0, table_service_1.getOrBuildTableState)(tableId);
             io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
-
-            // If the server has pending board cards for the next street, reveal them with pacing.
-            (async () => {
+            // If the last action ended a betting round and the server has pending board cards,
+            // reveal them with a PokerStars-like pacing.
+            void (async () => {
                 try {
                     const rt = await (0, runtime_1.getRuntime)(tableId);
                     const pending = Array.isArray(rt?.pendingBoard) ? rt.pendingBoard : [];
                     if (rt && rt.isDealingBoard && pending.length) {
-                        await revealPendingBoard(io, tableId);
+                        await revealPendingBoard(io, tableId, () => (0, table_service_1.getOrBuildTableState)(tableId), () => (0, runtime_1.getRuntime)(tableId), (r) => (0, runtime_1.setRuntime)(tableId, r));
+                    }
+                    // If the hand is in "auto-runout" mode (all-in / no more actions),
+                    // keep dealing streets until showdown.
+                    const auto = await runAutoRunout(io, tableId, () => (0, table_service_1.getOrBuildTableState)(tableId), () => (0, runtime_1.getRuntime)(tableId), (r) => (0, runtime_1.setRuntime)(tableId, r));
+                    if (auto?.showdown) {
+                        const sd = auto.showdown;
+                        io.to(`table:${tableId}`).emit("table:event", {
+                            type: "SHOWDOWN_REVEAL",
+                            tableId,
+                            pot: sd.pot,
+                            reveal: sd.reveal,
+                            winners: sd.winners,
+                        });
+                        io.to(`table:${tableId}`).emit("table:event", {
+                            type: "HAND_ENDED",
+                            tableId,
+                            winners: sd.winners,
+                            pot: sd.pot,
+                        });
+                        // Auto-start next hand after a short pause so players can see the result.
+                        setTimeout(() => {
+                            void (async () => {
+                                try {
+                                    const start = await (0, runtime_1.startHandIfReady)(tableId);
+                                    if (start.started && start.runtime) {
+                                        const newState = await (0, table_service_1.getOrBuildTableState)(tableId);
+                                        io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
+                                        io.to(`table:${tableId}`).emit("table:event", {
+                                            type: "HAND_STARTED",
+                                            tableId,
+                                            handId: start.runtime.handId,
+                                            round: start.runtime.round,
+                                        });
+                                        for (const p of Object.values(start.runtime.players)) {
+                                            const cards = await (0, runtime_1.getPrivateCards)(tableId, start.runtime.handId, p.userId);
+                                            if (cards)
+                                                io.to(`user:${p.userId}`).emit("table:private_cards", { tableId, handId: start.runtime.handId, cards });
+                                        }
+                                    }
+                                }
+                                catch {
+                                    // ignore
+                                }
+                            })();
+                        }, SHOWDOWN_HOLD_MS);
                     }
                 }
                 catch {
+                    // ignore
                 }
             })();
             if (result.handEnded) {
                 let delay = WIN_BY_FOLD_HOLD_MS;
                 if (result.winnerSeat != null) {
-                    io.to(`table:${tableId}`).emit("table:event", { type: "HAND_ENDED", tableId, winnerSeat: result.winnerSeat });
+                    io.to(`table:${tableId}`).emit("table:event", {
+                        type: "HAND_ENDED",
+                        tableId,
+                        winnerSeat: result.winnerSeat,
+                    });
                 }
                 if (result.showdown) {
                     delay = SHOWDOWN_HOLD_MS;
@@ -146,7 +222,7 @@ function registerTableGateway(io, socket) {
                 }
                 // Auto-start next hand after a short pause so players can see the result.
                 setTimeout(() => {
-                    (async () => {
+                    void (async () => {
                         try {
                             const start = await (0, runtime_1.startHandIfReady)(tableId);
                             if (start.started && start.runtime) {
@@ -166,6 +242,7 @@ function registerTableGateway(io, socket) {
                             }
                         }
                         catch {
+                            // ignore
                         }
                     })();
                 }, delay);
