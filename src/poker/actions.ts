@@ -51,6 +51,28 @@ function nextActiveSeat(rt: TableRuntime, fromSeat: number): number {
   return nextSeatFrom(activeSeatNos(rt), fromSeat);
 }
 
+/**
+ * Returns the first actionable seat for postflop streets.
+ * In heads-up, the dealer (SB) acts first postflop (they are out of position).
+ * In 3+ player games, first-to-act is the first active player left of the dealer.
+ *
+ * Unlike nextActionableSeat(), this function includes the dealerSeat itself
+ * as a candidate when the game is heads-up (i.e., only 2 active players).
+ */
+function firstPostflopActionableSeat(rt: TableRuntime): number {
+  const active = actionableSeatNos(rt);
+  if (active.length === 0) return rt.dealerSeat;
+
+  // Heads-up: dealer is SB and acts first postflop.
+  // Check if dealer is still actionable — if so, start with them.
+  if (active.length <= 2 && active.includes(rt.dealerSeat)) {
+    return rt.dealerSeat;
+  }
+
+  // 3+ players (or dealer is all-in/folded): first active seat left of dealer.
+  return nextSeatFrom(active, rt.dealerSeat);
+}
+
 function onlyOneLeft(rt: TableRuntime): number | null {
   const act = activeSeatNos(rt);
   return act.length === 1 ? act[0] : null;
@@ -240,8 +262,16 @@ export async function applyTableAction(params: {
     rt.currentBet = raiseTo;
     rt.lastAggressorSeat = seat.seatNo;
 
-    // After a raise, everyone must get a new chance to respond.
-    for (const k of Object.keys(rt.actedThisRound)) rt.actedThisRound[Number(k)] = false;
+    // Re-opening action rule (TDA / Robert's Rules of Poker):
+    // - Full raise (>= minTo): reopens action for ALL players who already acted.
+    // - Sub-raise all-in (< minTo): does NOT reopen action for players who already called/raised.
+    //   Those players may only call the new amount; they cannot re-raise.
+    const isFullRaise = raiseTo >= minTo;
+    if (isFullRaise) {
+      // Full raise: everyone gets a new chance to act.
+      for (const k of Object.keys(rt.actedThisRound)) rt.actedThisRound[Number(k)] = false;
+    }
+    // In both cases, the raiser themselves has acted.
     rt.actedThisRound[seat.seatNo] = true;
   }
 
@@ -302,8 +332,8 @@ export async function applyTableAction(params: {
     // The gateway will keep revealing streets until SHOWDOWN.
     (rt as any).autoRunout = shouldAutoRunout(rt);
 
-    // set turn to first actionable seat after dealer for postflop
-    rt.currentTurnSeat = nextActionableSeat(rt, rt.dealerSeat);
+    // Postflop first-to-act: SB (left of dealer) in 3+ players; dealer (SB) in heads-up.
+    rt.currentTurnSeat = firstPostflopActionableSeat(rt);
     setTurnDeadline(rt);
   } else {
     // next player's turn
@@ -382,7 +412,7 @@ export async function advanceAutoRunout(tableId: string): Promise<
     rt.deck = d.rest;
     (rt as any).pendingBoard = d.drawn;
     (rt as any).isDealingBoard = true;
-    rt.currentTurnSeat = nextActionableSeat(rt, rt.dealerSeat);
+    rt.currentTurnSeat = firstPostflopActionableSeat(rt);
     setTurnDeadline(rt);
     await setRuntime(tableId, rt);
     return { runtime: rt, handEnded: false };

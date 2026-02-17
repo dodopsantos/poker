@@ -81,6 +81,21 @@ export async function resolveShowdown(params: {
   // Distribute each pot to the best hand among eligible players for that pot.
   const payouts = new Map<number, number>();
 
+  // Odd chip rule (TDA / Robert's Rules):
+  // When a pot cannot be split evenly, the odd chip(s) go to the winner(s) closest
+  // to the left of the dealer button (i.e., lowest seat number going clockwise from dealer+1).
+  // We implement this by sorting winners starting from the seat immediately left of the dealer,
+  // wrapping around — so the first winner in that order receives the extra chip.
+  function sortByLeftOfDealer(seats: number[]): number[] {
+    const dealerSeat = rt.dealerSeat;
+    return seats.slice().sort((a, b) => {
+      // Distance clockwise from dealer: seat that is "just after" dealer comes first.
+      const distA = a > dealerSeat ? a - dealerSeat : a + 100 - dealerSeat;
+      const distB = b > dealerSeat ? b - dealerSeat : b + 100 - dealerSeat;
+      return distA - distB;
+    });
+  }
+
   for (const pot of pots) {
     const elig = pot.eligibleSeats.filter((s) => valueBySeat.has(s));
     if (elig.length === 0) continue;
@@ -91,7 +106,7 @@ export async function resolveShowdown(params: {
       if (v > best) best = v;
     }
 
-    const winnersSeats = elig.filter((s) => valueBySeat.get(s) === best).sort((a, b) => a - b);
+    const winnersSeats = sortByLeftOfDealer(elig.filter((s) => valueBySeat.get(s) === best));
     const base = Math.floor(pot.amount / winnersSeats.length);
     let rem = pot.amount - base * winnersSeats.length;
 
