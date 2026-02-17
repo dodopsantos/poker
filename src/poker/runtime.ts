@@ -57,8 +57,8 @@ export async function startHandIfReady(tableId: string): Promise<{ started: bool
     if (!table) throw new Error("TABLE_NOT_FOUND");
 
     const seated = table.seats
-      .filter((s) => s.userId && (s.state === "SITTING" || s.state === "PLAYING") && (s.stack ?? 0) > 0)
-      .map((s) => ({ seatNo: s.seatNo, userId: s.userId!, stack: s.stack ?? 0 }));
+      .filter((s: any) => s.userId && (s.state === "SITTING" || s.state === "PLAYING") && (s.stack ?? 0) > 0)
+      .map((s: any) => ({ seatNo: s.seatNo, userId: s.userId!, stack: s.stack ?? 0 }));
 
     if (seated.length < 2) return { started: false, runtime: null };
 
@@ -66,7 +66,7 @@ export async function startHandIfReady(tableId: string): Promise<{ started: bool
     // Dealer rotation: keep a pointer in Redis and advance to the next occupied seat each hand.
     const prevDealerRaw = await redis.get(dealerKey(tableId));
     const prevDealer = prevDealerRaw ? Number(prevDealerRaw) : null;
-    const fallbackDealer = seatNos.slice().sort((a, b) => a - b)[0];
+    const fallbackDealer = seatNos.slice().sort((a: any, b: any) => a - b)[0];
     const dealerSeat = Number.isFinite(prevDealer as any)
       ? nextOccupied(seatNos, prevDealer as number)
       : fallbackDealer;
@@ -110,13 +110,9 @@ export async function startHandIfReady(tableId: string): Promise<{ started: bool
     players[sbSeat].bet += sb;
     players[sbSeat].committed += sb;
     if (players[sbSeat].stack === 0) players[sbSeat].isAllIn = true;
-    players[sbSeat].committed += sb;
-    if (players[sbSeat].stack === 0) players[sbSeat].isAllIn = true;
 
     players[bbSeat].stack -= bb;
     players[bbSeat].bet += bb;
-    players[bbSeat].committed += bb;
-    if (players[bbSeat].stack === 0) players[bbSeat].isAllIn = true;
     players[bbSeat].committed += bb;
     if (players[bbSeat].stack === 0) players[bbSeat].isAllIn = true;
 

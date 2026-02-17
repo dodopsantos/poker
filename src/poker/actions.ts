@@ -1,10 +1,16 @@
 import { prisma } from "../prisma";
+import { redis } from "../redis";
 import { getRuntime, setRuntime, clearRuntime, roundNext } from "./runtime";
 import type { TableRuntime, BettingRound } from "./types";
 import { draw } from "./cards";
 import { resolveShowdown } from "./showdown";
 
 const TURN_TIME_MS = Number(process.env.TURN_TIME_MS ?? 15000);
+const ACTION_LOCK_TTL_MS = 3000; // max time an action lock is held
+
+function actionLockKey(tableId: string) {
+  return `table:${tableId}:action_lock`;
+}
 
 export type PlayerAction = "CHECK" | "CALL" | "RAISE" | "FOLD";
 
@@ -144,7 +150,7 @@ export async function applyTableAction(params: {
   timeout?: boolean;
 }): Promise<
   | { runtime: TableRuntime; handEnded: false }
-  | { runtime: null; handEnded: true; winnerSeat: number }
+  | { runtime: null; handEnded: true; winnerSeat: number; winnerUserId: string; payout: number }
   | {
       runtime: null;
       handEnded: true;
@@ -157,6 +163,12 @@ export async function applyTableAction(params: {
 > {
   const { tableId, userId, action, amount, timeout } = params;
 
+  // Distributed lock: prevents two concurrent actions from racing on the same table.
+  // NX = only set if not exists; PX = TTL in ms.
+  const lockAcquired = await redis.set(actionLockKey(tableId), userId, "PX", ACTION_LOCK_TTL_MS, "NX");
+  if (!lockAcquired) throw new Error("ACTION_IN_PROGRESS");
+
+  try {
   const rt = await getRuntime(tableId);
   if (!rt) throw new Error("NO_HAND_RUNNING");
 
@@ -171,24 +183,9 @@ export async function applyTableAction(params: {
   const toCall = Math.max(0, rt.currentBet - seat.bet);
 
   // Track consecutive turn timeouts per player.
-  // - If this was a timeout-forced action: increment.
-  // - Otherwise (player acted normally): reset.
+  // - If this was a timeout-forced action: increment once.
+  // - Otherwise (player acted voluntarily): reset to 0.
   if (timeout) {
-    seat.timeoutsInRow = (seat.timeoutsInRow ?? 0) + 1;
-  } else {
-    seat.timeoutsInRow = 0;
-  }
-
-  // Track consecutive timeouts (used to auto-remove "away" players).
-  if (timeout) {
-    seat.timeoutsInRow = (seat.timeoutsInRow ?? 0) + 1;
-  } else {
-    seat.timeoutsInRow = 0;
-  }
-
-  // Track consecutive timeouts (used by the gateway to remove "away" players).
-  // Any non-timeout action resets the counter.
-  if (params.timeout) {
     seat.timeoutsInRow = (seat.timeoutsInRow ?? 0) + 1;
   } else {
     seat.timeoutsInRow = 0;
@@ -251,10 +248,17 @@ export async function applyTableAction(params: {
   // win by everyone folding
   const winnerByFold = onlyOneLeft(rt);
   if (winnerByFold != null) {
-    rt.players[winnerByFold].stack += rt.pot.total;
+    const payout = rt.pot.total;
+    rt.players[winnerByFold].stack += payout;
     await persistStacks(tableId, rt);
     await clearRuntime(tableId);
-    return { runtime: null, handEnded: true, winnerSeat: winnerByFold };
+    return {
+      runtime: null,
+      handEnded: true,
+      winnerSeat: winnerByFold,
+      winnerUserId: rt.players[winnerByFold].userId,
+      payout,
+    };
   }
 
   // advance turn / rounds
@@ -311,6 +315,9 @@ export async function applyTableAction(params: {
   await persistStacks(tableId, rt);
 
   return { runtime: rt, handEnded: false };
+  } finally {
+    await redis.del(actionLockKey(tableId));
+  }
 }
 
 /**

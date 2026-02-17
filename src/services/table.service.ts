@@ -32,6 +32,7 @@ async function buildPublicState(tableId: string): Promise<PublicTableState> {
         stack,
         bet,
         hasFolded: p ? p.hasFolded : false,
+        isAllIn: p ? p.isAllIn : false,
         isDealer: rt ? rt.dealerSeat === s.seatNo : false,
         isTurn: rt ? rt.currentTurnSeat === s.seatNo : false,
       };
@@ -45,6 +46,10 @@ async function buildPublicState(tableId: string): Promise<PublicTableState> {
         pot: rt.pot,
         currentBet: rt.currentBet,
         minRaise: rt.minRaise,
+        // Fields needed for client reconnection / timer sync
+        turnEndsAt: (rt as any).turnEndsAt ?? null,
+        isDealingBoard: (rt as any).isDealingBoard ?? false,
+        autoRunout: (rt as any).autoRunout ?? false,
       }
     : {
         handId: null,
@@ -53,6 +58,9 @@ async function buildPublicState(tableId: string): Promise<PublicTableState> {
         pot: { total: 0 },
         currentBet: 0,
         minRaise: table.bigBlind,
+        turnEndsAt: null,
+        isDealingBoard: false,
+        autoRunout: false,
       };
 
   return {

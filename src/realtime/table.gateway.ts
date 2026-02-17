@@ -143,15 +143,13 @@ async function scheduleTurnTimer(io: Server, tableId: string) {
         if ((result as any).handEnded && (result as any).winnerSeat != null) {
           // Hand ended -> safe moment to kick away players.
           await flushPendingKicks(io, tableId);
-          const winnerSeat = (result as any).winnerSeat as number;
-          const winnerUserId = (result as any).winnerUserId as string;
-          const payout = (result as any).payout as number;
+          const r = result as { handEnded: true; winnerSeat: number; winnerUserId: string; payout: number };
 
           io.to(`table:${tableId}`).emit("table:event", {
             type: "HAND_ENDED",
             tableId,
-            winners: [{ seatNo: winnerSeat, userId: winnerUserId, payout }],
-            pot: payout,
+            winners: [{ seatNo: r.winnerSeat, userId: r.winnerUserId, payout: r.payout }],
+            pot: r.payout,
           });
 
           clearTurnTimer(tableId);
@@ -217,9 +215,6 @@ async function scheduleTurnTimer(io: Server, tableId: string) {
 
               // Hand ended -> safe moment to kick away players.
               await flushPendingKicks(io, tableId);
-
-              // Hand ended -> safe moment to kick away players.
-              await flushPendingKicks(io, tableId);
               io.to(`table:${tableId}`).emit("table:event", {
                 type: "SHOWDOWN_REVEAL",
                 tableId,
@@ -275,17 +270,12 @@ async function scheduleTurnTimer(io: Server, tableId: string) {
           // Showdown end is handled above by the auto-runout sequence.
           // Here we handle win-by-fold (common when timeout forces a fold).
           if ((result as any).winnerSeat != null) {
+            const r = result as { handEnded: true; winnerSeat: number; winnerUserId: string; payout: number };
             io.to(`table:${tableId}`).emit("table:event", {
               type: "HAND_ENDED",
               tableId,
-              winners: [
-                {
-                  seatNo: (result as any).winnerSeat,
-                  userId: (result as any).winnerUserId,
-                  payout: (result as any).payout,
-                },
-              ],
-              pot: (result as any).payout,
+              winners: [{ seatNo: r.winnerSeat, userId: r.winnerUserId, payout: r.payout }],
+              pot: r.payout,
             });
 
             setTimeout(() => {
@@ -382,8 +372,10 @@ async function revealPendingBoard(
       const state = await getState();
       io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
 
-      // Actions are unlocked again; (re)schedule the turn timer.
-      void scheduleTurnTimer(io, tableId);
+      // NOTE: scheduleTurnTimer is NOT called here intentionally.
+      // The caller (table:action / timeout handler) always calls runAutoRunout after revealPendingBoard,
+      // and runAutoRunout will schedule the timer once. Calling it here too would create a race condition
+      // where two timers exist simultaneously for the same turn.
     }
 
     await new Promise((r) => setTimeout(r, STREET_POST_DELAY_MS));
@@ -623,10 +615,12 @@ export function registerTableGateway(io: Server, socket: Socket) {
           let delay = WIN_BY_FOLD_HOLD_MS;
 
           if ((result as any).winnerSeat != null) {
+            const r = result as { handEnded: true; winnerSeat: number; winnerUserId: string; payout: number };
             io.to(`table:${tableId}`).emit("table:event", {
               type: "HAND_ENDED",
               tableId,
-              winnerSeat: (result as any).winnerSeat,
+              winners: [{ seatNo: r.winnerSeat, userId: r.winnerUserId, payout: r.payout }],
+              pot: r.payout,
             });
           }
 
