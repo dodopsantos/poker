@@ -19,8 +19,8 @@ async function buildPublicState(tableId: string): Promise<PublicTableState> {
   const rt = await getRuntime(tableId);
 
   const seats = table.seats
-    .sort((a, b) => a.seatNo - b.seatNo)
-    .map((s) => {
+    .sort((a: any, b: any) => a.seatNo - b.seatNo)
+    .map((s: any) => {
       const p = rt?.players?.[s.seatNo];
       const bet = p ? p.bet : 0;
       const stack = p ? p.stack : (s.stack ?? 0);
@@ -33,6 +33,7 @@ async function buildPublicState(tableId: string): Promise<PublicTableState> {
         bet,
         hasFolded: p ? p.hasFolded : false,
         isAllIn: p ? p.isAllIn : false,
+        isSittingOut: p ? (p.isSittingOut ?? false) : false,
         isDealer: rt ? rt.dealerSeat === s.seatNo : false,
         isTurn: rt ? rt.currentTurnSeat === s.seatNo : false,
       };
@@ -107,12 +108,22 @@ export async function sitWithBuyIn(params: {
 
   await ensureWallet(userId);
 
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: any) => {
     const seat = await tx.tableSeat.findUnique({
       where: { tableId_seatNo: { tableId, seatNo } },
+      include: { table: true },
     });
     if (!seat) throw new Error("SEAT_NOT_FOUND");
     if (seat.userId) throw new Error("SEAT_TAKEN");
+
+    // Enforce standard cash game buy-in limits:
+    // Min buy-in: 20x big blind  (configurable via table in future)
+    // Max buy-in: 100x big blind
+    const bigBlind = seat.table.bigBlind;
+    const minBuyIn = bigBlind * 20;
+    const maxBuyIn = bigBlind * 100;
+    if (buyInAmount < minBuyIn) throw new Error(`BUYIN_TOO_SMALL:${minBuyIn}`);
+    if (buyInAmount > maxBuyIn) throw new Error(`BUYIN_TOO_LARGE:${maxBuyIn}`);
 
     const wallet = await tx.wallet.findUnique({ where: { userId } });
     if (!wallet) throw new Error("WALLET_NOT_FOUND");
@@ -137,7 +148,7 @@ export async function leaveWithCashout(params: { tableId: string; userId: string
   const { tableId, userId } = params;
   await ensureWallet(userId);
 
-  await prisma.$transaction(async (tx) => {
+  await prisma.$transaction(async (tx: any) => {
     const seat = await tx.tableSeat.findFirst({ where: { tableId, userId } });
     if (!seat) return;
 
@@ -154,6 +165,50 @@ export async function leaveWithCashout(params: { tableId: string; userId: string
         data: { userId, tableId, type: "CASHOUT", amount: stack },
       });
     }
+  });
+
+  await redis.del(tableStateKey(tableId));
+  return getOrBuildTableState(tableId);
+}
+
+/**
+ * Rebuy: adds chips to the player's stack between hands.
+ * Only allowed when no hand is currently running at the table.
+ * The new stack must not exceed the table's max buy-in (100x BB).
+ */
+export async function rebuyStack(params: {
+  tableId: string;
+  userId: string;
+  amount: number;
+}) {
+  const { tableId, userId, amount } = params;
+  if (amount <= 0) throw new Error("INVALID_AMOUNT");
+
+  await prisma.$transaction(async (tx: any) => {
+    const seat = await tx.tableSeat.findFirst({
+      where: { tableId, userId },
+      include: { table: true },
+    });
+    if (!seat) throw new Error("NOT_SEATED");
+    if (seat.state === "PLAYING") throw new Error("HAND_IN_PROGRESS");
+
+    const bigBlind = seat.table.bigBlind;
+    const maxBuyIn = bigBlind * 100;
+    const currentStack = seat.stack ?? 0;
+    if (currentStack + amount > maxBuyIn) throw new Error(`REBUY_EXCEEDS_MAX:${maxBuyIn}`);
+
+    const wallet = await tx.wallet.findUnique({ where: { userId } });
+    if (!wallet) throw new Error("WALLET_NOT_FOUND");
+    if (wallet.balance < amount) throw new Error("INSUFFICIENT_FUNDS");
+
+    await tx.wallet.update({ where: { userId }, data: { balance: { decrement: amount } } });
+    await tx.tableSeat.update({
+      where: { id: seat.id },
+      data: { stack: { increment: amount } },
+    });
+    await tx.ledgerTransaction.create({
+      data: { userId, tableId, type: "BUYIN", amount: -amount },
+    });
   });
 
   await redis.del(tableStateKey(tableId));

@@ -1,5 +1,5 @@
 import type { Server, Socket } from "socket.io";
-import { getOrBuildTableState, sitWithBuyIn, leaveWithCashout } from "../services/table.service";
+import { getOrBuildTableState, sitWithBuyIn, leaveWithCashout, rebuyStack } from "../services/table.service";
 import { ensureWallet } from "../services/wallet.service";
 import { startHandIfReady, getPrivateCards, getRuntime, setRuntime } from "../poker/runtime";
 import { applyTableAction, advanceAutoRunout, type PlayerAction } from "../poker/actions";
@@ -83,7 +83,7 @@ function clearTurnTimer(tableId: string) {
   turnTimers.delete(tableId);
 }
 
-async function scheduleTurnTimer(io: Server, tableId: string) {
+export async function scheduleTurnTimer(io: Server, tableId: string) {
   clearTurnTimer(tableId);
 
   const rt = await getRuntime(tableId);
@@ -120,15 +120,22 @@ async function scheduleTurnTimer(io: Server, tableId: string) {
         const toCall = Math.max(0, (rt2.currentBet ?? 0) - (seat.bet ?? 0));
         const forced: PlayerAction = toCall === 0 ? "CHECK" : "FOLD";
 
-        // Count this as a timeout strike for this user.
-        const strikes = incTimeoutStrike(tableId, seat.userId);
-
-        // If the player reached the strike limit, mark them to be removed at the end of the betting round.
-        if (strikes >= AWAY_TIMEOUTS_IN_ROW) {
-          markPendingKick(tableId, seat.userId);
+        // Sit-out players: auto-act silently without strike penalty.
+        // Regular timeout: increment strike and possibly kick the player.
+        const isSittingOut = !!(seat as any).isSittingOut;
+        if (!isSittingOut) {
+          const strikes = incTimeoutStrike(tableId, seat.userId);
+          if (strikes >= AWAY_TIMEOUTS_IN_ROW) {
+            markPendingKick(tableId, seat.userId);
+          }
         }
 
-        const result = await applyTableAction({ tableId, userId: seat.userId, action: forced, timeout: true });
+        const result = await applyTableAction({
+          tableId,
+          userId: seat.userId,
+          action: forced,
+          timeout: !isSittingOut, // only mark as timeout if not a voluntary sit-out
+        });
 
         const state = await getOrBuildTableState(tableId);
         io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
@@ -492,11 +499,99 @@ export function registerTableGateway(io: Server, socket: Socket) {
 
   socket.on("table:leave", async ({ tableId }: { tableId: string }) => {
     try {
+      const rt = await getRuntime(tableId);
+
+      // If a hand is running and this player is still active (not folded, not all-in out),
+      // we cannot cashout immediately — that would corrupt the pot and seat state mid-hand.
+      // Instead, mark them as pending removal: they will be cashed out at the next safe
+      // moment (street advance or hand end), exactly like the timeout-kick flow.
+      if (rt) {
+        const seat = Object.values(rt.players).find((p) => p.userId === user.userId);
+        const isActiveInHand = seat && !seat.hasFolded;
+
+        if (isActiveInHand) {
+          markPendingKick(tableId, user.userId);
+          // Acknowledge the leave request so the client knows it was received.
+          socket.emit("table:event", {
+            type: "LEAVE_PENDING",
+            tableId,
+            message: "You will be removed at the end of the current hand.",
+          });
+          return;
+        }
+      }
+
+      // No active hand, or player already folded/all-in-out: safe to cashout now.
       const newState = await leaveWithCashout({ tableId, userId: user.userId });
       io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
       io.to("lobby").emit("lobby:table_updated", { tableId });
     } catch (e: any) {
       socket.emit("table:event", { type: "ERROR", code: e.message ?? "UNKNOWN", message: "Could not leave." });
+    }
+  });
+
+  // table:rebuy — adds chips between hands (SITTING state only, not PLAYING).
+  socket.on(
+    "table:rebuy",
+    async (
+      { tableId, amount }: { tableId: string; amount: number },
+      cb?: (ack: { ok: boolean; error?: { code: string; message: string } }) => void
+    ) => {
+      try {
+        const rt = await getRuntime(tableId);
+        if (rt) {
+          // Safety check: if a hand is running, only allow rebuy if player already folded.
+          const seat = Object.values(rt.players).find((p) => p.userId === user.userId);
+          if (seat && !seat.hasFolded) {
+            throw new Error("HAND_IN_PROGRESS");
+          }
+        }
+
+        const newState = await rebuyStack({ tableId, userId: user.userId, amount });
+        io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
+        cb?.({ ok: true });
+      } catch (e: any) {
+        const code = e.message ?? "UNKNOWN";
+        socket.emit("table:event", { type: "ERROR", code, message: "Could not rebuy." });
+        cb?.({ ok: false, error: { code, message: "Could not rebuy." } });
+      }
+    }
+  );
+
+  // table:sit_out — player voluntarily sits out. Their turns will be auto-folded/checked
+  // without any timeout strike or kick penalty.
+  socket.on("table:sit_out", async ({ tableId }: { tableId: string }) => {
+    try {
+      const rt = await getRuntime(tableId);
+      if (!rt) throw new Error("NO_HAND_RUNNING");
+      const seat = Object.values(rt.players).find((p) => p.userId === user.userId);
+      if (!seat) throw new Error("NOT_SEATED");
+      seat.isSittingOut = true;
+      await setRuntime(tableId, rt);
+      const state = await getOrBuildTableState(tableId);
+      io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
+      socket.emit("table:event", { type: "SIT_OUT_ACK", tableId, isSittingOut: true });
+    } catch (e: any) {
+      socket.emit("table:event", { type: "ERROR", code: e.message ?? "UNKNOWN", message: "Could not sit out." });
+    }
+  });
+
+  // table:sit_in — player returns from sit-out.
+  socket.on("table:sit_in", async ({ tableId }: { tableId: string }) => {
+    try {
+      const rt = await getRuntime(tableId);
+      if (rt) {
+        const seat = Object.values(rt.players).find((p) => p.userId === user.userId);
+        if (seat) {
+          seat.isSittingOut = false;
+          await setRuntime(tableId, rt);
+        }
+      }
+      const state = await getOrBuildTableState(tableId);
+      io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
+      socket.emit("table:event", { type: "SIT_OUT_ACK", tableId, isSittingOut: false });
+    } catch (e: any) {
+      socket.emit("table:event", { type: "ERROR", code: e.message ?? "UNKNOWN", message: "Could not sit in." });
     }
   });
 

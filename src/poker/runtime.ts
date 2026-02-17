@@ -56,8 +56,26 @@ export async function startHandIfReady(tableId: string): Promise<{ started: bool
     });
     if (!table) throw new Error("TABLE_NOT_FOUND");
 
+    // Players need at least 1 BB to participate in a hand.
+    // Those with less are auto-cashed out before the hand starts.
+    const minStack = table.bigBlind;
+    const allSeated = table.seats.filter(
+      (s: any) => s.userId && (s.state === "SITTING" || s.state === "PLAYING")
+    );
+
+    // Auto-cashout players below minimum stack (silently, between hands).
+    for (const s of allSeated) {
+      if ((s.stack ?? 0) < minStack && (s.stack ?? 0) > 0) {
+        await prisma.$transaction(async (tx: any) => {
+          await tx.wallet.update({ where: { userId: s.userId }, data: { balance: { increment: s.stack } } });
+          await tx.ledgerTransaction.create({ data: { userId: s.userId, tableId, type: "CASHOUT", amount: s.stack } });
+          await tx.tableSeat.update({ where: { id: s.id }, data: { userId: null, stack: 0, state: "EMPTY" } });
+        });
+      }
+    }
+
     const seated = table.seats
-      .filter((s: any) => s.userId && (s.state === "SITTING" || s.state === "PLAYING") && (s.stack ?? 0) > 0)
+      .filter((s: any) => s.userId && (s.state === "SITTING" || s.state === "PLAYING") && (s.stack ?? 0) >= minStack)
       .map((s: any) => ({ seatNo: s.seatNo, userId: s.userId!, stack: s.stack ?? 0 }));
 
     if (seated.length < 2) return { started: false, runtime: null };

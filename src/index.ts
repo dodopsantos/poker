@@ -21,7 +21,7 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
   })
 );
-app.use((req, res, next) => {
+app.use((req: any, res: any, next: any) => {
   // Preflight request
   if (req.method === "OPTIONS") {
     return res.sendStatus(204);
@@ -163,8 +163,33 @@ app.post("/tables", async (req: express.Request, res: express.Response) => {
 });
 
 const server = http.createServer(app);
-buildSocketServer(server);
+const io = buildSocketServer(server);
 
 server.listen(process.env.PORT ?? 3001, () => {
   console.log(`API listening on :${process.env.PORT ?? 3001}`);
+
+  // Recover in-progress hands whose turn timers were lost on restart/crash.
+  import('./poker/timer-recovery').then(({ recoverActiveTimers }) => {
+    recoverActiveTimers(io).catch((err: unknown) =>
+      console.error('[timer-recovery] Boot recovery failed:', err)
+    );
+  });
 });
+
+// --- Graceful shutdown ---
+async function shutdown(signal: string) {
+  console.log(`[shutdown] Received ${signal}, shutting down gracefully...`);
+  server.close(async () => {
+    try {
+      await prisma.$disconnect();
+      console.log('[shutdown] Prisma disconnected.');
+    } catch (err) {
+      console.error('[shutdown] Error disconnecting Prisma:', err);
+    }
+    process.exit(0);
+  });
+  setTimeout(() => { process.exit(1); }, 10_000).unref();
+}
+
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT',  () => void shutdown('SIGINT'));

@@ -12,6 +12,12 @@ export type SeatRuntime = {
   hasFolded: boolean;
   /** How many consecutive turn timeouts this player has had in the current session. */
   timeoutsInRow?: number;
+  /**
+   * True when the player has voluntarily sat out.
+   * Their turns are auto-folded (if there is something to call) or auto-checked,
+   * but this does NOT increment timeoutsInRow or trigger the away-kick flow.
+   */
+  isSittingOut?: boolean;
 };
 
 export type TableRuntime = {
