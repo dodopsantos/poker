@@ -146,6 +146,9 @@ export async function startHandIfReady(tableId: string): Promise<{ started: bool
       round: "PREFLOP",
       dealerSeat,
       currentTurnSeat,
+      // Set the first turn deadline immediately so scheduleTurnTimer can fire correctly.
+      // Without this, turnEndsAt = undefined → NaN → timer never schedules.
+      turnEndsAt: Date.now() + Number(process.env.TURN_TIME_MS ?? 15000),
       deck,
       board: [],
       pot: { total: sb + bb },
