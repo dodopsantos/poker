@@ -6,6 +6,7 @@ const prisma_1 = require("../prisma");
 const runtime_1 = require("./runtime");
 const cards_1 = require("./cards");
 const showdown_1 = require("./showdown");
+const TURN_TIME_MS = Number(process.env.TURN_TIME_MS ?? 15000);
 function contenders(rt) {
     return Object.values(rt.players).filter((p) => !p.hasFolded);
 }
@@ -45,10 +46,9 @@ function isRoundSettled(rt) {
     const act = contenders(rt);
     if (act.length <= 1)
         return true;
-    // If nobody (or only one seat) can still act because everyone else is all-in,
-    // the betting round is effectively over.
     const actionable = actionables(rt);
-    if (actionable.length <= 1)
+    // If nobody can act (everyone remaining is all-in / has 0 stack), no further decisions.
+    if (actionable.length === 0)
         return true;
     // Each player must get a chance to act on streets where currentBet == 0.
     // With the old logic, "CHECK" by the first player would instantly settle the round
@@ -61,9 +61,33 @@ function isRoundSettled(rt) {
     return allMatched && allActed;
 }
 function shouldAutoRunout(rt) {
-    // Auto-runout when there is no meaningful betting left (all remaining opponents are all-in).
-    // Example: 2 players, one all-in, the other calls (not all-in) -> betting is over.
-    return contenders(rt).length >= 2 && actionables(rt).length <= 1;
+    // Auto-runout is ONLY valid once the current betting round is actually settled.
+    if (!isRoundSettled(rt))
+        return false;
+    const cont = contenders(rt);
+    if (cont.length < 2)
+        return false;
+    const hasAllIn = cont.some((p) => p.isAllIn || p.stack === 0);
+    if (!hasAllIn)
+        return false;
+    return actionables(rt).length <= 1;
+}
+
+function setTurnDeadline(rt) {
+    if (rt.isDealingBoard || rt.autoRunout) {
+        rt.turnEndsAt = null;
+        return;
+    }
+    const actionable = actionables(rt);
+    if (actionable.length === 0) {
+        rt.turnEndsAt = null;
+        return;
+    }
+    const isCurrentTurnActionable = actionable.some((p) => p.seatNo === rt.currentTurnSeat);
+    if (!isCurrentTurnActionable) {
+        rt.currentTurnSeat = nextActionableSeat(rt, rt.currentTurnSeat);
+    }
+    rt.turnEndsAt = Date.now() + TURN_TIME_MS;
 }
 function resetBets(rt) {
     for (const p of Object.values(rt.players))
@@ -90,7 +114,7 @@ async function persistStacks(tableId, rt) {
     });
 }
 async function applyTableAction(params) {
-    const { tableId, userId, action, amount } = params;
+    const { tableId, userId, action, amount, timeout } = params;
     const rt = await (0, runtime_1.getRuntime)(tableId);
     if (!rt)
         throw new Error("NO_HAND_RUNNING");
@@ -105,6 +129,13 @@ async function applyTableAction(params) {
     if (rt.currentTurnSeat !== seat.seatNo)
         throw new Error("NOT_YOUR_TURN");
     const toCall = Math.max(0, rt.currentBet - seat.bet);
+    // Track consecutive turn timeouts per player.
+    if (timeout) {
+        seat.timeoutsInRow = (seat.timeoutsInRow ?? 0) + 1;
+    }
+    else {
+        seat.timeoutsInRow = 0;
+    }
     if (action === "FOLD") {
         seat.hasFolded = true;
         rt.actedThisRound[seat.seatNo] = true;
@@ -207,10 +238,12 @@ async function applyTableAction(params) {
         rt.autoRunout = shouldAutoRunout(rt);
         // set turn to first actionable seat after dealer for postflop
         rt.currentTurnSeat = nextActionableSeat(rt, rt.dealerSeat);
+        setTurnDeadline(rt);
     }
     else {
         // next player's turn
         rt.currentTurnSeat = nextActionableSeat(rt, rt.currentTurnSeat);
+        setTurnDeadline(rt);
     }
     await (0, runtime_1.setRuntime)(tableId, rt);
     await persistStacks(tableId, rt);
@@ -262,6 +295,7 @@ async function advanceAutoRunout(tableId) {
         rt.pendingBoard = d.drawn;
         rt.isDealingBoard = true;
         rt.currentTurnSeat = nextActionableSeat(rt, rt.dealerSeat);
+        setTurnDeadline(rt);
         await (0, runtime_1.setRuntime)(tableId, rt);
         return { runtime: rt, handEnded: false };
     }

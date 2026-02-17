@@ -4,6 +4,11 @@ import { applyTableAction } from "./actions";
 import { getOrBuildTableState } from "../services/table.service";
 import { startHandIfReady, getPrivateCards } from "./runtime";
 
+// Keep the same UX pacing as the realtime gateway.
+// (So the table can show winners / pot result before the next hand.)
+const WIN_BY_FOLD_HOLD_MS = Number(process.env.WIN_BY_FOLD_HOLD_MS ?? 1200);
+const SHOWDOWN_HOLD_MS = Number(process.env.SHOWDOWN_HOLD_MS ?? 2200);
+
 const timers = new Map<string, { key: string; timeout: NodeJS.Timeout }>();
 
 function timerKey(rt: any) {
@@ -66,23 +71,67 @@ export async function scheduleTurnTimer(io: Server, tableId: string) {
       io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
 
       if (result.handEnded) {
-        // Auto-start next hand if possible (same behavior as manual actions)
-        const start = await startHandIfReady(tableId);
-        if (start.started && start.runtime) {
-          const newState = await getOrBuildTableState(tableId);
-          io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
-          io.to(`table:${tableId}`).emit("table:event", {
-            type: "HAND_STARTED",
-            tableId,
-            handId: start.runtime.handId,
-            round: start.runtime.round,
-          });
+        // When the hand ends via timeout, clients still expect the same events
+        // (HAND_ENDED / SHOWDOWN_REVEAL) as when a player clicks an action.
+        let delay = WIN_BY_FOLD_HOLD_MS;
 
-          for (const pl of Object.values(start.runtime.players)) {
-            const cards = await getPrivateCards(tableId, start.runtime.handId, (pl as any).userId);
-            if (cards) io.to(`user:${(pl as any).userId}`).emit("table:private_cards", { tableId, handId: start.runtime.handId, cards });
-          }
+        if ((result as any).winnerSeat != null) {
+          io.to(`table:${tableId}`).emit("table:event", {
+            type: "HAND_ENDED",
+            tableId,
+            winnerSeat: (result as any).winnerSeat,
+            // Optional richer payload for UI (PokerStars-like)
+            winners: (result as any).winnerUserId
+              ? [{ seatNo: (result as any).winnerSeat, userId: (result as any).winnerUserId, payout: (result as any).payout ?? 0 }]
+              : undefined,
+            pot: (result as any).payout ?? undefined,
+          });
         }
+
+        if ((result as any).showdown) {
+          delay = SHOWDOWN_HOLD_MS;
+          const sd = (result as any).showdown;
+
+          io.to(`table:${tableId}`).emit("table:event", {
+            type: "SHOWDOWN_REVEAL",
+            tableId,
+            pot: sd.pot,
+            reveal: sd.reveal,
+            winners: sd.winners,
+          });
+          io.to(`table:${tableId}`).emit("table:event", {
+            type: "HAND_ENDED",
+            tableId,
+            winners: sd.winners,
+            pot: sd.pot,
+          });
+        }
+
+        // Auto-start next hand after a short pause (same as gateway)
+        setTimeout(() => {
+          void (async () => {
+            try {
+              const start = await startHandIfReady(tableId);
+              if (start.started && start.runtime) {
+                const newState = await getOrBuildTableState(tableId);
+                io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
+                io.to(`table:${tableId}`).emit("table:event", {
+                  type: "HAND_STARTED",
+                  tableId,
+                  handId: start.runtime.handId,
+                  round: start.runtime.round,
+                });
+
+                for (const pl of Object.values(start.runtime.players)) {
+                  const cards = await getPrivateCards(tableId, start.runtime.handId, (pl as any).userId);
+                  if (cards) io.to(`user:${(pl as any).userId}`).emit("table:private_cards", { tableId, handId: start.runtime.handId, cards });
+                }
+              }
+            } catch {
+              // ignore
+            }
+          })();
+        }, delay);
       }
 
       // Schedule next turn if still running

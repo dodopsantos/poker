@@ -5,6 +5,10 @@ const runtime_1 = require("./runtime");
 const actions_1 = require("./actions");
 const table_service_1 = require("../services/table.service");
 const runtime_2 = require("./runtime");
+// Keep the same UX pacing as the realtime gateway.
+// (So the table can show winners / pot result before the next hand.)
+const WIN_BY_FOLD_HOLD_MS = Number(process.env.WIN_BY_FOLD_HOLD_MS ?? 1200);
+const SHOWDOWN_HOLD_MS = Number(process.env.SHOWDOWN_HOLD_MS ?? 2200);
 const timers = new Map();
 function timerKey(rt) {
     return `${rt.handId}:${rt.currentTurnSeat}:${rt.turnEndsAt}`;
@@ -58,23 +62,63 @@ async function scheduleTurnTimer(io, tableId) {
             const state = await (0, table_service_1.getOrBuildTableState)(tableId);
             io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state });
             if (result.handEnded) {
-                // Auto-start next hand if possible (same behavior as manual actions)
-                const start = await (0, runtime_2.startHandIfReady)(tableId);
-                if (start.started && start.runtime) {
-                    const newState = await (0, table_service_1.getOrBuildTableState)(tableId);
-                    io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
+                // When the hand ends via timeout, clients still expect the same events
+                // (HAND_ENDED / SHOWDOWN_REVEAL) as when a player clicks an action.
+                let delay = WIN_BY_FOLD_HOLD_MS;
+                if (result.winnerSeat != null) {
                     io.to(`table:${tableId}`).emit("table:event", {
-                        type: "HAND_STARTED",
+                        type: "HAND_ENDED",
                         tableId,
-                        handId: start.runtime.handId,
-                        round: start.runtime.round,
+                        winnerSeat: result.winnerSeat,
+                        winners: result.winnerUserId
+                            ? [{ seatNo: result.winnerSeat, userId: result.winnerUserId, payout: result.payout ?? 0 }]
+                            : undefined,
+                        pot: result.payout ?? undefined,
                     });
-                    for (const pl of Object.values(start.runtime.players)) {
-                        const cards = await (0, runtime_2.getPrivateCards)(tableId, start.runtime.handId, pl.userId);
-                        if (cards)
-                            io.to(`user:${pl.userId}`).emit("table:private_cards", { tableId, handId: start.runtime.handId, cards });
-                    }
                 }
+                if (result.showdown) {
+                    delay = SHOWDOWN_HOLD_MS;
+                    const sd = result.showdown;
+                    io.to(`table:${tableId}`).emit("table:event", {
+                        type: "SHOWDOWN_REVEAL",
+                        tableId,
+                        pot: sd.pot,
+                        reveal: sd.reveal,
+                        winners: sd.winners,
+                    });
+                    io.to(`table:${tableId}`).emit("table:event", {
+                        type: "HAND_ENDED",
+                        tableId,
+                        winners: sd.winners,
+                        pot: sd.pot,
+                    });
+                }
+                // Auto-start next hand after a short pause (same as gateway)
+                setTimeout(() => {
+                    void (async () => {
+                        try {
+                            const start = await (0, runtime_2.startHandIfReady)(tableId);
+                            if (start.started && start.runtime) {
+                                const newState = await (0, table_service_1.getOrBuildTableState)(tableId);
+                                io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
+                                io.to(`table:${tableId}`).emit("table:event", {
+                                    type: "HAND_STARTED",
+                                    tableId,
+                                    handId: start.runtime.handId,
+                                    round: start.runtime.round,
+                                });
+                                for (const pl of Object.values(start.runtime.players)) {
+                                    const cards = await (0, runtime_2.getPrivateCards)(tableId, start.runtime.handId, pl.userId);
+                                    if (cards)
+                                        io.to(`user:${pl.userId}`).emit("table:private_cards", { tableId, handId: start.runtime.handId, cards });
+                                }
+                            }
+                        }
+                        catch {
+                            // ignore
+                        }
+                    })();
+                }, delay);
             }
             // Schedule next turn if still running
             await scheduleTurnTimer(io, tableId);

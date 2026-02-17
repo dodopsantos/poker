@@ -10,6 +10,8 @@ export type SeatRuntime = {
   /** True once the player is all-in (stack==0 and not folded). */
   isAllIn: boolean;
   hasFolded: boolean;
+  /** How many consecutive turn timeouts this player has had in the current session. */
+  timeoutsInRow?: number;
 };
 
 export type TableRuntime = {
@@ -17,12 +19,16 @@ export type TableRuntime = {
   round: BettingRound;
   dealerSeat: number;
   currentTurnSeat: number;
+  /** Epoch ms when the current turn expires (server-authoritative). */
+  turnEndsAt?: number | null;
   deck: string[];   // remaining deck
   board: string[];
   /** Cards drawn for the next street but not yet revealed (used for server-timed animations). */
   pendingBoard?: string[];
   /** True while the server is revealing board cards (clients should not act). */
   isDealingBoard?: boolean;
+  /** True when remaining streets should be dealt automatically (all-in runout). */
+  autoRunout?: boolean;
   pot: { total: number };
   currentBet: number;
   minRaise: number;
