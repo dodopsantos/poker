@@ -1,4 +1,10 @@
 import "dotenv/config";
+import { validateEnv, logEnvSummary } from "./config/env";
+
+// Validate environment variables FIRST, before any other imports that depend on them.
+const env = validateEnv();
+logEnvSummary(env);
+
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -8,6 +14,7 @@ import bcrypt from "bcrypt";
 import { z } from "zod";
 import { signJwt, verifyJwt } from "./auth";
 import { ensureWallet } from "./services/wallet.service";
+import { RateLimiters } from "./middleware/rate-limit";
 
 const app = express();
 
@@ -41,7 +48,7 @@ const authBodySchema = z.object({
   password: z.string().min(6).max(128),
 });
 
-app.post("/auth/register", async (req: express.Request, res: express.Response) => {
+app.post("/auth/register", RateLimiters.auth, async (req: express.Request, res: express.Response) => {
   const parsed = authBodySchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "INVALID_BODY", details: parsed.error.flatten() });
@@ -68,7 +75,7 @@ app.post("/auth/register", async (req: express.Request, res: express.Response) =
   return res.json({ token, user, wallet });
 });
 
-app.post("/auth/login", async (req: express.Request, res: express.Response) => {
+app.post("/auth/login", RateLimiters.auth, async (req: express.Request, res: express.Response) => {
   const parsed = authBodySchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: "INVALID_BODY", details: parsed.error.flatten() });
@@ -95,11 +102,18 @@ app.post("/auth/login", async (req: express.Request, res: express.Response) => {
   return res.json({ token, user: { id: user.id, username: user.username }, wallet });
 });
 
-function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+async function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
   try {
     const header = req.headers.authorization?.toString() ?? "";
     const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
     if (!token) return res.status(401).json({ error: "UNAUTHORIZED" });
+    
+    // Check blacklist first
+    const { isTokenBlacklisted } = await import("./auth");
+    if (await isTokenBlacklisted(token)) {
+      return res.status(401).json({ error: "TOKEN_REVOKED" });
+    }
+    
     const user = verifyJwt(token);
     (req as any).user = user;
     return next();
@@ -107,6 +121,17 @@ function requireAuth(req: express.Request, res: express.Response, next: express.
     return res.status(401).json({ error: "UNAUTHORIZED" });
   }
 }
+
+// Logout: blacklist the current token
+app.post("/auth/logout", requireAuth, async (req: express.Request, res: express.Response) => {
+  const header = req.headers.authorization?.toString() ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice("Bearer ".length) : "";
+  if (token) {
+    const { blacklistToken } = await import("./auth");
+    await blacklistToken(token);
+  }
+  res.json({ ok: true });
+});
 
 app.get("/wallet", requireAuth, async (req: express.Request, res: express.Response) => {
   const user = (req as any).user as { userId: string };
@@ -138,9 +163,23 @@ app.get("/tables", async (_req: express.Request, res: express.Response) => {
   );
 });
 
-// (Opcional) init seats ao criar mesa
-app.post("/tables", async (req: express.Request, res: express.Response) => {
+// Create table (authenticated users only, rate limited)
+// In production, this should be further restricted to admin users only.
+app.post("/tables", requireAuth, RateLimiters.tableCreate, async (req: express.Request, res: express.Response) => {
   const { name, smallBlind, bigBlind, maxPlayers } = req.body;
+
+  // Basic validation
+  if (!name || typeof smallBlind !== "number" || typeof bigBlind !== "number" || typeof maxPlayers !== "number") {
+    return res.status(400).json({ error: "INVALID_BODY", message: "Missing or invalid fields." });
+  }
+
+  if (maxPlayers < 2 || maxPlayers > 10) {
+    return res.status(400).json({ error: "INVALID_MAX_PLAYERS", message: "maxPlayers must be between 2 and 10." });
+  }
+
+  if (smallBlind <= 0 || bigBlind <= 0 || bigBlind <= smallBlind) {
+    return res.status(400).json({ error: "INVALID_BLINDS", message: "Blinds must be positive and BB > SB." });
+  }
 
   const table = await prisma.table.create({
     data: {

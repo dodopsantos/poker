@@ -3,6 +3,10 @@ import { getOrBuildTableState, sitWithBuyIn, leaveWithCashout, rebuyStack } from
 import { ensureWallet } from "../services/wallet.service";
 import { startHandIfReady, getPrivateCards, getRuntime, setRuntime } from "../poker/runtime";
 import { applyTableAction, advanceAutoRunout, type PlayerAction } from "../poker/actions";
+import { allowSocketEvent, SocketRateLimits } from "../middleware/rate-limit";
+import { saveHandHistory } from "../services/hand-history.service";
+import { logger } from "../lib/logger";
+import { prisma } from "../prisma";
 
 // --- Server-timed UX (PokerStars-like pacing) ---
 // Board dealing (flop/turn/river) reveal timings
@@ -405,6 +409,13 @@ export function registerTableGateway(io: Server, socket: Socket) {
   const user = (socket.data as any).user as { userId: string; username: string };
 
   socket.on("table:join", async ({ tableId }: { tableId: string }) => {
+    if (!(await allowSocketEvent(socket, "table:join", SocketRateLimits.join))) {
+      socket.emit("table:event", { type: "ERROR", code: "RATE_LIMIT", message: "Too many join requests." });
+      return;
+    }
+
+    logger.playerJoined(tableId, user.userId);
+
     await ensureWallet(user.userId);
     socket.join(`table:${tableId}`);
 
@@ -424,6 +435,11 @@ export function registerTableGateway(io: Server, socket: Socket) {
   socket.on(
     "table:sit",
     async ({ tableId, seatNo, buyInAmount }: { tableId: string; seatNo: number; buyInAmount: number }) => {
+      if (!(await allowSocketEvent(socket, "table:sit", SocketRateLimits.sitLeave))) {
+        socket.emit("table:event", { type: "ERROR", code: "RATE_LIMIT", message: "Too many sit requests." });
+        return;
+      }
+
       try {
         const stateAfterSit = await sitWithBuyIn({ tableId, userId: user.userId, seatNo, buyInAmount });
 
@@ -460,6 +476,11 @@ export function registerTableGateway(io: Server, socket: Socket) {
   );
 
   socket.on("table:leave", async ({ tableId }: { tableId: string }) => {
+    if (!(await allowSocketEvent(socket, "table:leave", SocketRateLimits.sitLeave))) {
+      socket.emit("table:event", { type: "ERROR", code: "RATE_LIMIT", message: "Too many leave requests." });
+      return;
+    }
+
     try {
       const rt = await getRuntime(tableId);
 
@@ -499,6 +520,12 @@ export function registerTableGateway(io: Server, socket: Socket) {
       { tableId, amount }: { tableId: string; amount: number },
       cb?: (ack: { ok: boolean; error?: { code: string; message: string } }) => void
     ) => {
+      if (!(await allowSocketEvent(socket, "table:rebuy", SocketRateLimits.rebuy))) {
+        socket.emit("table:event", { type: "ERROR", code: "RATE_LIMIT", message: "Too many rebuy requests." });
+        cb?.({ ok: false, error: { code: "RATE_LIMIT", message: "Too many rebuy requests." } });
+        return;
+      }
+
       try {
         const rt = await getRuntime(tableId);
         if (rt) {
@@ -563,6 +590,12 @@ export function registerTableGateway(io: Server, socket: Socket) {
       { tableId, action, amount }: { tableId: string; action: PlayerAction; amount?: number },
       cb?: (ack: { ok: boolean; error?: { code: string; message: string } }) => void
     ) => {
+      if (!(await allowSocketEvent(socket, "table:action", SocketRateLimits.action))) {
+        socket.emit("table:event", { type: "ERROR", code: "RATE_LIMIT", message: "Too many actions." });
+        cb?.({ ok: false, error: { code: "RATE_LIMIT", message: "Too many actions." } });
+        return;
+      }
+
       try {
         // Any manual action resets the player's timeout strike counter.
         resetTimeoutStrike(tableId, user.userId);
@@ -670,6 +703,36 @@ export function registerTableGateway(io: Server, socket: Socket) {
           // Hand ended -> safe moment to kick away players.
           await flushPendingKicks(io, tableId);
           let delay = WIN_BY_FOLD_HOLD_MS;
+
+          // Save hand history (non-blocking).
+          // rtBefore contains the runtime BEFORE the final action, so we need to capture it properly.
+          // For now, we'll use the result to reconstruct the runtime.
+          const table = await prisma.table.findUnique({ where: { id: tableId }, select: { smallBlind: true, bigBlind: true } });
+          if (table && rtBefore) {
+            void (async () => {
+              try {
+                if ((result as any).winnerSeat != null) {
+                  const r = result as { handEnded: true; winnerSeat: number; winnerUserId: string; payout: number };
+                  await saveHandHistory({
+                    tableId,
+                    runtime: rtBefore,
+                    result: { type: "fold", winnerSeat: r.winnerSeat, winnerUserId: r.winnerUserId, payout: r.payout },
+                    smallBlind: table.smallBlind,
+                    bigBlind: table.bigBlind,
+                  });
+                } else if ((result as any).showdown) {
+                  const sd = (result as any).showdown;
+                  await saveHandHistory({
+                    tableId,
+                    runtime: rtBefore,
+                    result: { type: "showdown", reveal: sd.reveal, winners: sd.winners },
+                    smallBlind: table.smallBlind,
+                    bigBlind: table.bigBlind,
+                  });
+                }
+              } catch { /* ignore history save failures */ }
+            })();
+          }
 
           if ((result as any).winnerSeat != null) {
             const r = result as { handEnded: true; winnerSeat: number; winnerUserId: string; payout: number };

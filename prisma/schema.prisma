@@ -90,3 +90,23 @@ model TableSeat {
   @@unique([tableId, seatNo])
   @@index([userId])
 }
+model HandHistory {
+  id         String   @id @default(uuid())
+  tableId    String
+  handId     String   // runtime handId (timestamp-based)
+  dealerSeat Int
+  smallBlind Int
+  bigBlind   Int
+  // Players who participated (JSON: [{seatNo, userId, startStack, endStack, payout}])
+  players    Json
+  // Board cards (JSON: [cards])
+  board      Json
+  // Winner(s) (JSON: [{seatNo, userId, payout, handRank}] or {seatNo, userId, payout, reason: "fold"})
+  result     Json
+  // Complete action log (JSON: [{round, seatNo, action, amount}])
+  actions    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([tableId, createdAt])
+  @@index([handId])
+}
