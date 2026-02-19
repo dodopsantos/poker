@@ -368,12 +368,12 @@ async function runAutoRunout(
 ): Promise<
   | null
   | {
-      showdown: {
-        pot: number;
-        reveal: Array<{ seatNo: number; userId: string; cards: string[] }>;
-        winners: Array<{ seatNo: number; userId: string; payout: number }>;
-      };
-    }
+    showdown: {
+      pot: number;
+      reveal: Array<{ seatNo: number; userId: string; cards: string[] }>;
+      winners: Array<{ seatNo: number; userId: string; payout: number }>;
+    };
+  }
 > {
   // Keep advancing streets while auto-runout is enabled.
   for (let guard = 0; guard < 10; guard++) {
@@ -798,4 +798,55 @@ export function registerTableGateway(io: Server, socket: Socket) {
       }
     }
   );
+
+  // ============================================
+  // CHAT HANDLERS
+  // ============================================
+
+  socket.on("table:chat:message", async ({ tableId, message }: { tableId: string; message: string }) => {
+    try {
+      const { checkChatRateLimit, validateChatMessage, saveChatMessage } = await import("../services/chat.service");
+
+      // Validação
+      const validation = validateChatMessage(message);
+      if (!validation.valid) {
+        socket.emit("table:chat:error", { error: validation.error });
+        return;
+      }
+
+      // Rate limiting
+      const allowed = await checkChatRateLimit(tableId, user.userId);
+      if (!allowed) {
+        socket.emit("table:chat:error", {
+          error: "Você está enviando mensagens muito rápido. Aguarde um momento."
+        });
+        return;
+      }
+
+      // Salvar mensagem
+      const chatMsg = await saveChatMessage({
+        tableId,
+        userId: user.userId,
+        username: user.username,
+        message,
+      });
+
+      // Broadcast para todos na mesa
+      io.to(`table:${tableId}`).emit("table:chat:message", chatMsg);
+    } catch (err: any) {
+      console.error("[chat] Send message error:", err);
+      socket.emit("table:chat:error", { error: "Erro ao enviar mensagem" });
+    }
+  });
+
+  socket.on("table:chat:history", async ({ tableId, limit }: { tableId: string; limit?: number }) => {
+    try {
+      const { getChatHistory } = await import("../services/chat.service");
+      const messages = await getChatHistory(tableId, limit ?? 50);
+      socket.emit("table:chat:history", { messages });
+    } catch (err: any) {
+      console.error("[chat] Get history error:", err);
+      socket.emit("table:chat:error", { error: "Erro ao carregar histórico" });
+    }
+  });
 }

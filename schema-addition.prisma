@@ -1,0 +1,13 @@
+// Adicionar ao schema.prisma:
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  tableId   String
+  userId    String
+  username  String
+  message   String   @db.VarChar(500)
+  createdAt DateTime @default(now())
+
+  @@index([tableId, createdAt])
+  @@index([userId])
+}
