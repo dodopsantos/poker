@@ -39,8 +39,17 @@ function actionableSeatNos(rt: TableRuntime): number[] {
 
 function nextSeatFrom(list: number[], fromSeat: number): number {
   if (!list.length) return fromSeat;
-  for (const s of list) if (s > fromSeat) return s;
-  return list[0];
+  
+  // Ordenar seats para busca circular
+  const sorted = [...list].sort((a, b) => a - b);
+  
+  // Procurar próximo seat maior que fromSeat
+  for (const s of sorted) {
+    if (s > fromSeat) return s;
+  }
+  
+  // Se não achou (fromSeat é o maior), retorna o menor (wrap around)
+  return sorted[0];
 }
 
 function nextActionableSeat(rt: TableRuntime, fromSeat: number): number {

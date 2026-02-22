@@ -4,6 +4,19 @@
 
 import { prisma } from "../prisma";
 
+
+type StatsEntry = {
+  userId: string;
+  username: string;
+  handsPlayed: number;
+  handsWon: number;
+  winRate: number;
+  totalProfit: number;
+  biggestWin: number;
+};
+
+type OrderByField = { [key: string]: "asc" | "desc" };
+
 export type LeaderboardMetric = "profit" | "winRate" | "handsPlayed" | "biggestWin";
 export type LeaderboardPeriod = "all" | "30d" | "7d" | "today";
 
@@ -33,7 +46,7 @@ export async function getLeaderboard(
   // All-time stats
   const MIN_HANDS = metric === "winRate" ? 100 : 1; // Win rate requer min 100 mãos
 
-  let orderBy: any = {};
+  let orderBy: OrderByField = {};
   switch (metric) {
     case "profit":
       orderBy = { totalProfit: "desc" };
@@ -63,7 +76,7 @@ export async function getLeaderboard(
     take: limit * 2, // Pegar mais para filtrar win rate
   });
 
-  let entries = stats.map((s: any) => ({
+  let entries = stats.map((s) => ({
     userId: s.userId,
     username: s.user.username,
     handsPlayed: s.handsPlayed,
@@ -76,15 +89,15 @@ export async function getLeaderboard(
   // Sort por win rate se necessário
   if (metric === "winRate") {
     entries = entries
-      .filter((e: any) => e.handsPlayed >= MIN_HANDS)
-      .sort((a: any, b: any) => b.winRate - a.winRate)
+      .filter((e) => e.handsPlayed >= MIN_HANDS)
+      .sort((a, b) => b.winRate - a.winRate)
       .slice(0, limit);
   } else {
     entries = entries.slice(0, limit);
   }
 
   // Calcular value baseado no metric
-  return entries.map((e: any, idx: any) => ({
+  return entries.map((e, idx) => ({
     rank: idx + 1,
     userId: e.userId,
     username: e.username,
@@ -119,16 +132,16 @@ async function getLeaderboardFromDailyStats(
   });
 
   // Buscar usernames
-  const userIds = aggregated.map((a: any) => a.userId);
+  const userIds = aggregated.map((a) => a.userId);
   const users = await prisma.user.findMany({
     where: { id: { in: userIds } },
     select: { id: true, username: true },
   });
 
-  const userMap = new Map(users.map((u: any) => [u.id, u.username]));
+  const userMap = new Map(users.map((u) => [u.id, u.username]));
 
   // Montar entries
-  let entries = aggregated.map((a: any) => {
+  let entries = aggregated.map((a) => {
     const handsPlayed = a._sum.handsPlayed ?? 0;
     const handsWon = a._sum.handsWon ?? 0;
     const profit = a._sum.profit ?? 0;
@@ -147,27 +160,27 @@ async function getLeaderboardFromDailyStats(
 
   // Filtrar e ordenar
   const MIN_HANDS = metric === "winRate" ? 50 : 1;
-  entries = entries.filter((e: any) => e.handsPlayed >= MIN_HANDS);
+  entries = entries.filter((e) => e.handsPlayed >= MIN_HANDS);
 
   switch (metric) {
     case "profit":
-      entries.sort((a: any, b: any) => b.totalProfit - a.totalProfit);
+      entries.sort((a, b) => b.totalProfit - a.totalProfit);
       break;
     case "winRate":
-      entries.sort((a: any, b: any) => b.winRate - a.winRate);
+      entries.sort((a, b) => b.winRate - a.winRate);
       break;
     case "handsPlayed":
-      entries.sort((a: any, b: any) => b.handsPlayed - a.handsPlayed);
+      entries.sort((a, b) => b.handsPlayed - a.handsPlayed);
       break;
     case "biggestWin":
       // Not available in daily stats, fall back to profit
-      entries.sort((a: any, b: any) => b.totalProfit - a.totalProfit);
+      entries.sort((a, b) => b.totalProfit - a.totalProfit);
       break;
   }
 
   entries = entries.slice(0, limit);
 
-  return entries.map((e: any, idx: any) => ({
+  return entries.map((e, idx) => ({
     rank: idx + 1,
     userId: e.userId,
     username: e.username,
@@ -198,7 +211,7 @@ export async function getPlayerRank(
     return null;
   }
 
-  let condition: any = {};
+  let condition: Record<string, any> = {};
   const MIN_HANDS = metric === "winRate" ? 100 : 1;
 
   switch (metric) {
@@ -219,7 +232,7 @@ export async function getPlayerRank(
       });
 
       const myWinRate = stats.handsPlayed > 0 ? stats.handsWon / stats.handsPlayed : 0;
-      const betterCount = allStats.filter((s: any) => {
+      const betterCount = allStats.filter((s) => {
         const wr = s.handsPlayed > 0 ? s.handsWon / s.handsPlayed : 0;
         return wr > myWinRate;
       }).length;
@@ -279,7 +292,7 @@ async function getPlayerRankFromDailyStats(
     },
   });
 
-  const betterCount = allPlayers.filter((p: any) => {
+  const betterCount = allPlayers.filter((p) => {
     const value =
       metric === "profit"
         ? (p._sum.profit ?? 0)
@@ -296,7 +309,7 @@ async function getPlayerRankFromDailyStats(
 /**
  * Helpers
  */
-function getMetricValue(entry: any, metric: LeaderboardMetric): number {
+function getMetricValue(entry: StatsEntry, metric: LeaderboardMetric): number {
   switch (metric) {
     case "profit":
       return entry.totalProfit;

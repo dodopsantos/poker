@@ -3,7 +3,7 @@
  */
 
 import { prisma } from "../prisma";
-import { deleteRuntime } from "../poker/runtime";
+import { clearRuntime } from "../poker/runtime";
 import type { Server } from "socket.io";
 
 /**
@@ -23,7 +23,7 @@ export async function checkAndCleanupEmptyTable(io: Server, tableId: string): Pr
       console.log(`[table-mgmt] Table ${tableId} is empty, cleaning up...`);
 
       // Limpar runtime (Redis)
-      await deleteRuntime(tableId);
+      await clearRuntime(tableId);
 
       // Resetar status da mesa para OPEN
       await prisma.table.update({

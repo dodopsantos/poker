@@ -6,7 +6,7 @@ const env = validateEnv();
 logEnvSummary(env);
 
 import express from "express";
-import leaderboardRoutes from "./leaderboard.routes";
+import { createLeaderboardRoutes } from "./leaderboard.routes";
 
 import http from "http";
 import cors from "cors";
@@ -215,6 +215,10 @@ app.post("/tables", requireAuth, RateLimiters.tableCreate, async (req: express.R
 
   res.json(table);
 });
+
+// Leaderboard & Stats routes
+const leaderboardRouter = createLeaderboardRoutes(requireAuth);
+app.use(leaderboardRouter);
 
 const server = http.createServer(app);
 const io = buildSocketServer(server);

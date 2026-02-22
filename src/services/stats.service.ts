@@ -35,7 +35,7 @@ export async function ensurePlayerStats(userId: string): Promise<void> {
 export async function updatePlayerStats(userId: string, update: StatsUpdate): Promise<void> {
   await ensurePlayerStats(userId);
 
-  const data: any = {
+  const data: Record<string, any> = {
     updatedAt: new Date(),
   };
 
