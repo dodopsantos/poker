@@ -5,6 +5,9 @@ import { startHandIfReady, getPrivateCards, getRuntime, setRuntime } from "../po
 import { applyTableAction, advanceAutoRunout, type PlayerAction } from "../poker/actions";
 import { allowSocketEvent, SocketRateLimits } from "../middleware/rate-limit";
 import { saveHandHistory } from "../services/hand-history.service";
+import { recordHandResult, updatePlayerStats } from "../services/stats.service";
+
+import { removePlayerFromOtherTables, checkAndCleanupEmptyTable } from "../services/table-management.service";
 import { logger } from "../lib/logger";
 import { prisma } from "../prisma";
 
@@ -414,6 +417,10 @@ export function registerTableGateway(io: Server, socket: Socket) {
       return;
     }
 
+
+    // Remove player from other tables before joining
+    await removePlayerFromOtherTables(io, user.userId, tableId);
+
     logger.playerJoined(tableId, user.userId);
 
     await ensureWallet(user.userId);
@@ -442,6 +449,13 @@ export function registerTableGateway(io: Server, socket: Socket) {
 
       try {
         const stateAfterSit = await sitWithBuyIn({ tableId, userId: user.userId, seatNo, buyInAmount });
+        
+        // Record buy-in in stats
+        try {
+          await updatePlayerStats(user.userId, { buyins: buyInAmount });
+        } catch (err) {
+          console.error("[stats] Error recording buy-in:", err);
+        }
 
         // Maybe start a hand
         const start = await startHandIfReady(tableId);
@@ -508,6 +522,9 @@ export function registerTableGateway(io: Server, socket: Socket) {
       const newState = await leaveWithCashout({ tableId, userId: user.userId });
       io.to(`table:${tableId}`).emit("table:event", { type: "STATE_SNAPSHOT", tableId, state: newState });
       io.to("lobby").emit("lobby:table_updated", { tableId });
+
+      // Check if table is empty and cleanup
+      await checkAndCleanupEmptyTable(io, tableId);
     } catch (e: any) {
       socket.emit("table:event", { type: "ERROR", code: e.message ?? "UNKNOWN", message: "Could not leave." });
     }
@@ -720,6 +737,25 @@ export function registerTableGateway(io: Server, socket: Socket) {
                     smallBlind: table.smallBlind,
                     bigBlind: table.bigBlind,
                   });
+                  
+                  // Record stats for all players
+                  try {
+                    for (const [_, player] of Object.entries(rtBefore.players)) {
+                      if (player.committed === 0) continue;
+                      
+                      const payout = player.userId === r.winnerUserId ? r.payout : 0;
+                      const isWinner = player.userId === r.winnerUserId;
+                      
+                      await recordHandResult({
+                        userId: player.userId,
+                        isWinner,
+                        payout,
+                        committed: player.committed,
+                      });
+                    }
+                  } catch (err) {
+                    console.error("[stats] Error recording hand results:", err);
+                  }
                 } else if ((result as any).showdown) {
                   const sd = (result as any).showdown;
                   await saveHandHistory({
@@ -729,6 +765,28 @@ export function registerTableGateway(io: Server, socket: Socket) {
                     smallBlind: table.smallBlind,
                     bigBlind: table.bigBlind,
                   });
+                  
+                  // Record stats for all players (showdown)
+                  try {
+                    const winnerUserIds = new Set(sd.winners.map((w: any) => w.userId));
+                    
+                    for (const [_, player] of Object.entries(rtBefore.players)) {
+                      if (player.committed === 0) continue;
+                      
+                      const winnerInfo = sd.winners.find((w: any) => w.userId === player.userId);
+                      const payout = winnerInfo?.payout ?? 0;
+                      const isWinner = winnerUserIds.has(player.userId);
+                      
+                      await recordHandResult({
+                        userId: player.userId,
+                        isWinner,
+                        payout,
+                        committed: player.committed,
+                      });
+                    }
+                  } catch (err) {
+                    console.error("[stats] Error recording hand results (showdown):", err);
+                  }
                 }
               } catch { /* ignore history save failures */ }
             })();
@@ -847,6 +905,16 @@ export function registerTableGateway(io: Server, socket: Socket) {
     } catch (err: any) {
       console.error("[chat] Get history error:", err);
       socket.emit("table:chat:error", { error: "Erro ao carregar histórico" });
+    }
+  });
+
+  socket.on("disconnect", async () => {
+    try {
+      // Remove player from all tables on disconnect
+      await removePlayerFromOtherTables(io, user.userId);
+      console.log(`[disconnect] User ${user.userId} (${user.username}) disconnected and removed from all tables`);
+    } catch (err) {
+      console.error("[disconnect] Error handling disconnect:", err);
     }
   });
 }

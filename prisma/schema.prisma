@@ -30,9 +30,11 @@ model User {
   passwordHash String
   createdAt    DateTime @default(now())
 
-  wallet Wallet?
-  seats  TableSeat[]
-  ledger LedgerTransaction[]
+  wallet     Wallet?
+  seats      TableSeat[]
+  ledger     LedgerTransaction[]
+  stats      PlayerStats?
+  dailyStats DailyStats[]
 }
 
 model Wallet {
@@ -87,6 +89,7 @@ model TableSeat {
   table Table @relation(fields: [tableId], references: [id])
   user  User? @relation(fields: [userId], references: [id])
 
+  @@index([userId, state])
   @@unique([tableId, seatNo])
   @@index([userId])
 }
@@ -121,4 +124,54 @@ model ChatMessage {
 
   @@index([tableId, createdAt])
   @@index([userId])
+}
+model PlayerStats {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  
+  // Core stats
+  handsPlayed    Int      @default(0)
+  handsWon       Int      @default(0)
+  totalProfit    Int      @default(0)
+  biggestWin     Int      @default(0)
+  biggestLoss    Int      @default(0)
+  
+  // Money flow
+  totalBuyins    Int      @default(0)
+  totalCashouts  Int      @default(0)
+  
+  // Advanced stats (optional - future)
+  vpip           Float?   @default(0)
+  pfr            Float?   @default(0)
+  aggressionFactor Float? @default(0)
+  
+  // Timestamps
+  lastHandAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  user User @relation(fields: [userId], references: [id])
+  
+  @@index([totalProfit])
+  @@index([handsWon])
+  @@index([handsPlayed])
+  @@index([biggestWin])
+}
+
+model DailyStats {
+  id        String   @id @default(uuid())
+  userId    String
+  date      DateTime @db.Date
+  
+  handsPlayed Int @default(0)
+  handsWon    Int @default(0)
+  profit      Int @default(0)
+  
+  createdAt DateTime @default(now())
+  
+  user User @relation(fields: [userId], references: [id])
+  
+  @@unique([userId, date])
+  @@index([date])
+  @@index([userId, date])
 }

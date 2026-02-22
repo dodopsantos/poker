@@ -1,5 +1,6 @@
 import { prisma } from "../prisma";
 import { redis } from "../redis";
+import { updatePlayerStats } from "./stats.service";
 import { ensureWallet } from "./wallet.service";
 import { getRuntime } from "../poker/runtime";
 
@@ -163,6 +164,13 @@ export async function leaveWithCashout(params: { tableId: string; userId: string
       await tx.wallet.update({ where: { userId }, data: { balance: { increment: stack } } });
       await tx.ledgerTransaction.create({
         data: { userId, tableId, type: "CASHOUT", amount: stack },
+      });
+      
+      // Record cashout in stats (outside transaction to avoid blocking)
+      setImmediate(() => {
+        updatePlayerStats(userId, { cashouts: stack }).catch(err => {
+          console.error("[stats] Error recording cashout:", err);
+        });
       });
     }
   });

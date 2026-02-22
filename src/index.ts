@@ -6,6 +6,8 @@ const env = validateEnv();
 logEnvSummary(env);
 
 import express from "express";
+import leaderboardRoutes from "./leaderboard.routes";
+
 import http from "http";
 import cors from "cors";
 import { buildSocketServer } from "./realtime/socket";
@@ -15,6 +17,7 @@ import { z } from "zod";
 import { signJwt, verifyJwt } from "./auth";
 import { ensureWallet } from "./services/wallet.service";
 import { RateLimiters } from "./middleware/rate-limit";
+import { cleanupAllEmptyTables } from "./services/table-management.service";
 
 const app = express();
 
@@ -65,6 +68,18 @@ app.post("/auth/register", RateLimiters.auth, async (req: express.Request, res: 
     data: { username, passwordHash },
     select: { id: true, username: true },
   });
+
+  // Cleanup empty tables on boot
+  setTimeout(async () => {
+    console.log('[boot] Running initial table cleanup...');
+    try {
+      const count = await cleanupAllEmptyTables(io);
+      console.log(`[boot] Cleaned up ${count} empty table(s)`);
+    } catch (err) {
+      console.error('[boot] Table cleanup failed:', err);
+    }
+  }, 5000); // 5s after boot
+
 
   const wallet = await prisma.wallet.create({
     data: { userId: user.id, balance: 10_000 },
