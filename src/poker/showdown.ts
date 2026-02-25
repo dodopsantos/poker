@@ -88,10 +88,11 @@ export async function resolveShowdown(params: {
   // wrapping around — so the first winner in that order receives the extra chip.
   function sortByLeftOfDealer(seats: number[]): number[] {
     const dealerSeat = rt.dealerSeat;
+    const maxSeats = Object.keys(rt.players).length;
     return seats.slice().sort((a, b) => {
       // Distance clockwise from dealer: seat that is "just after" dealer comes first.
-      const distA = a > dealerSeat ? a - dealerSeat : a + 100 - dealerSeat;
-      const distB = b > dealerSeat ? b - dealerSeat : b + 100 - dealerSeat;
+      const distA = a > dealerSeat ? a - dealerSeat : a + maxSeats - dealerSeat;
+      const distB = b > dealerSeat ? b - dealerSeat : b + maxSeats - dealerSeat;
       return distA - distB;
     });
   }
@@ -125,6 +126,21 @@ export async function resolveShowdown(params: {
       return { seatNo, userId: p.userId, payout, value: valueBySeat.get(seatNo) ?? 0 };
     })
     .sort((a, b) => b.payout - a.payout || a.seatNo - b.seatNo);
+
+
+  // Validate total chips (debugging)
+  const totalCommitted = Object.values(rt.players).reduce((s, p) => s + Math.max(0, Math.floor(p.committed ?? 0)), 0);
+  const totalPaid = winners.reduce((s, w) => s + w.payout, 0);
+  
+  if (totalCommitted !== totalPaid) {
+    console.error('[SHOWDOWN] CRITICAL: Chip mismatch!', {
+      totalCommitted,
+      totalPaid,
+      diff: totalCommitted - totalPaid,
+      pots: pots.map(p => ({ amount: p.amount, eligible: p.eligibleSeats })),
+      winners: winners.map(w => ({ seat: w.seatNo, payout: w.payout }))
+    });
+  }
 
   return { reveal, winners };
 }

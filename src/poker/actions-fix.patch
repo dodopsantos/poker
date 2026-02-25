@@ -1,0 +1,50 @@
+# Fix para nextSeatFrom - busca circular correta
+
+## ANTES (BUGADO):
+```typescript
+function nextSeatFrom(list: number[], fromSeat: number): number {
+  if (!list.length) return fromSeat;
+  for (const s of list) if (s > fromSeat) return s;  // ❌ Não circular!
+  return list[0];
+}
+```
+
+## DEPOIS (CORRETO):
+```typescript
+function nextSeatFrom(list: number[], fromSeat: number, maxSeats = 10): number {
+  if (!list.length) return fromSeat;
+  
+  // Busca circular: próximo seat após fromSeat
+  let nextSeat = (fromSeat + 1) % maxSeats;
+  
+  // Dar uma volta completa procurando o próximo seat na lista
+  for (let i = 0; i < maxSeats; i++) {
+    if (list.includes(nextSeat)) {
+      return nextSeat;
+    }
+    nextSeat = (nextSeat + 1) % maxSeats;
+  }
+  
+  // Se não encontrou, retorna o primeiro da lista (fallback)
+  return list[0];
+}
+```
+
+## MELHOR AINDA (com maxSeats do runtime):
+```typescript
+function nextSeatFrom(rt: TableRuntime, list: number[], fromSeat: number): number {
+  if (!list.length) return fromSeat;
+  
+  const maxSeats = Object.keys(rt.players).length;
+  let nextSeat = (fromSeat + 1) % maxSeats;
+  
+  for (let i = 0; i < maxSeats; i++) {
+    if (list.includes(nextSeat)) {
+      return nextSeat;
+    }
+    nextSeat = (nextSeat + 1) % maxSeats;
+  }
+  
+  return list[0];
+}
+```

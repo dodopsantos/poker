@@ -220,6 +220,65 @@ app.post("/tables", requireAuth, RateLimiters.tableCreate, async (req: express.R
 const leaderboardRouter = createLeaderboardRoutes(requireAuth);
 app.use(leaderboardRouter);
 
+// Hand History routes
+app.get("/history/me", requireAuth, async (req: express.Request, res: express.Response) => {
+  try {
+    const userId = (req as any).user.userId;
+    const limit = Math.min(Number(req.query.limit) || 50, 100);
+    const offset = Number(req.query.offset) || 0;
+
+    // Buscar mãos onde o usuário participou
+    // Como players é um JSON array, fazemos busca via raw query
+    const history = await prisma.$queryRaw`
+      SELECT * FROM "HandHistory"
+      WHERE players::jsonb @> ${`[{"userId": "${userId}"}]`}::jsonb
+      ORDER BY "createdAt" DESC
+      LIMIT ${limit}
+      OFFSET ${offset}
+    `;
+
+    res.json({ history });
+  } catch (err: any) {
+    console.error('[hand-history] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch hand history' });
+  }
+});
+
+app.get("/hands/:handId", requireAuth, async (req: express.Request, res: express.Response) => {
+  try {
+    const { handId } = req.params;
+    
+    const hand = await prisma.handHistory.findUnique({
+      where: { handId }
+    });
+    
+    if (!hand) {
+      return res.status(404).json({ error: 'Hand not found' });
+    }
+    
+    res.json({ hand });
+  } catch (err: any) {
+    console.error('[hand-details] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch hand details' });
+  }
+});
+
+app.get("/tables/:tableId/history", requireAuth, async (req: express.Request, res: express.Response) => {
+  try {
+    const { tableId } = req.params;
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const offset = Number(req.query.offset) || 0;
+
+    const { getTableHandHistory } = await import('./services/hand-history.service');
+    const history = await getTableHandHistory({ tableId, limit, offset });
+    
+    res.json({ history });
+  } catch (err: any) {
+    console.error('[table-history] Error:', err);
+    res.status(500).json({ error: 'Failed to fetch table history' });
+  }
+});
+
 const server = http.createServer(app);
 const io = buildSocketServer(server);
 
