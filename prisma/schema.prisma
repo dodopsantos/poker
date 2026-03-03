@@ -25,16 +25,21 @@ enum LedgerType {
 }
 
 model User {
-  id           String   @id @default(uuid())
-  username     String   @unique
-  passwordHash String
-  createdAt    DateTime @default(now())
+  id              String    @id @default(uuid())
+  username        String    @unique
+  passwordHash    String
+  role            String    @default("USER")  // USER or ADMIN
+  lastDailyBonus  DateTime?
+  lastRecharge    DateTime?
+  createdAt       DateTime  @default(now())
 
   wallet     Wallet?
   seats      TableSeat[]
   ledger     LedgerTransaction[]
   stats      PlayerStats?
   dailyStats DailyStats[]
+
+  @@index([role])
 }
 
 model Wallet {
