@@ -1,54 +1,40 @@
-# Poker (MVP)
+# Poker Backend
 
-Backend MVP for a poker lobby + tables (cash game) using:
-- Node.js + Express
-- Socket.IO (real-time)
-- PostgreSQL + Prisma
-- Redis (cache/state)
+Backend do sistema de poker online com Node.js, Express, Socket.IO e PostgreSQL.
 
-## Setup (local)
-
-1) Copy env file:
+## Setup
 
 ```bash
-cp .env.example .env
-```
+# 1. Instalar dependências
+npm install
 
-2) Configure `DATABASE_URL` (PostgreSQL) and start Redis.
+# 2. Configurar .env
+# Editar .env com suas credenciais
 
-3) Prisma migrate + generate:
+# 3. Rodar migrations
+npx prisma migrate deploy
+npx prisma generate
 
-```bash
-npm run prisma:migrate
-npm run prisma:generate
-```
-
-4) Run:
-
-```bash
+# 4. Iniciar servidor
 npm run dev
 ```
 
-## Auth (MVP)
+## Endpoints Principais
 
-- `POST /auth/register` { username, password }
-- `POST /auth/login` { username, password }
+- `POST /auth/register` - Registrar usuário
+- `POST /auth/login` - Login
+- `GET /wallet` - Ver saldo
+- `POST /wallet/recharge` - Recarregar saldo
+- `POST /wallet/daily-bonus` - Coletar bônus diário
+- `GET /profile/me` - Ver perfil
+- `GET /tables` - Listar mesas
+- Socket.IO para gameplay em tempo real
 
-Use the returned JWT token in Socket.IO handshake:
+## Variáveis de Ambiente
 
-```js
-const socket = io("http://localhost:3001", { auth: { token } });
 ```
-
-## Lobby / Table events
-
-Lobby:
-- client -> `lobby:join`
-- server -> `lobby:tables`
-
-Table:
-- client -> `table:join` { tableId }
-- server -> `table:state`
-- client -> `table:sit` { tableId, seatNo, buyInAmount }
-- client -> `table:leave` { tableId }
-- server -> `table:event` (STATE_SNAPSHOT / ERROR)
+DATABASE_URL="postgresql://user:password@localhost:5432/poker_db"
+REDIS_URL="redis://localhost:6379"
+JWT_SECRET="your-secret-key-min-32-chars"
+PORT=3001
+```

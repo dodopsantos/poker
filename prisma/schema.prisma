@@ -25,14 +25,21 @@ enum LedgerType {
 }
 
 model User {
-  id           String   @id @default(uuid())
-  username     String   @unique
-  passwordHash String
-  createdAt    DateTime @default(now())
+  id              String    @id @default(uuid())
+  username        String    @unique
+  passwordHash    String
+  role            String    @default("USER")  // USER or ADMIN
+  lastDailyBonus  DateTime?
+  lastRecharge    DateTime?
+  createdAt       DateTime  @default(now())
 
-  wallet Wallet?
-  seats  TableSeat[]
-  ledger LedgerTransaction[]
+  wallet     Wallet?
+  seats      TableSeat[]
+  ledger     LedgerTransaction[]
+  stats      PlayerStats?
+  dailyStats DailyStats[]
+
+  @@index([role])
 }
 
 model Wallet {
@@ -87,6 +94,89 @@ model TableSeat {
   table Table @relation(fields: [tableId], references: [id])
   user  User? @relation(fields: [userId], references: [id])
 
+  @@index([userId, state])
   @@unique([tableId, seatNo])
   @@index([userId])
+}
+model HandHistory {
+  id         String   @id @default(uuid())
+  tableId    String
+  handId     String   // runtime handId (timestamp-based)
+  dealerSeat Int
+  smallBlind Int
+  bigBlind   Int
+  // Players who participated (JSON: [{seatNo, userId, startStack, endStack, payout}])
+  players    Json
+  // Board cards (JSON: [cards])
+  board      Json
+  // Winner(s) (JSON: [{seatNo, userId, payout, handRank}] or {seatNo, userId, payout, reason: "fold"})
+  result     Json
+  // Complete action log (JSON: [{round, seatNo, action, amount}])
+  actions    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([tableId, createdAt])
+  @@index([handId])
+}
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  tableId   String
+  userId    String
+  username  String
+  message   String   @db.VarChar(500)
+  createdAt DateTime @default(now())
+
+  @@index([tableId, createdAt])
+  @@index([userId])
+}
+model PlayerStats {
+  id             String   @id @default(uuid())
+  userId         String   @unique
+  
+  // Core stats
+  handsPlayed    Int      @default(0)
+  handsWon       Int      @default(0)
+  totalProfit    Int      @default(0)
+  biggestWin     Int      @default(0)
+  biggestLoss    Int      @default(0)
+  
+  // Money flow
+  totalBuyins    Int      @default(0)
+  totalCashouts  Int      @default(0)
+  
+  // Advanced stats (optional - future)
+  vpip           Float?   @default(0)
+  pfr            Float?   @default(0)
+  aggressionFactor Float? @default(0)
+  
+  // Timestamps
+  lastHandAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  user User @relation(fields: [userId], references: [id])
+  
+  @@index([totalProfit])
+  @@index([handsWon])
+  @@index([handsPlayed])
+  @@index([biggestWin])
+}
+
+model DailyStats {
+  id        String   @id @default(uuid())
+  userId    String
+  date      DateTime @db.Date
+  
+  handsPlayed Int @default(0)
+  handsWon    Int @default(0)
+  profit      Int @default(0)
+  
+  createdAt DateTime @default(now())
+  
+  user User @relation(fields: [userId], references: [id])
+  
+  @@unique([userId, date])
+  @@index([date])
+  @@index([userId, date])
 }
